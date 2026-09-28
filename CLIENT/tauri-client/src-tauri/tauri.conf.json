@@ -4,9 +4,9 @@
   "version": "1.0.6",
   "identifier": "com.sjbtechnologies.awc",
   "build": {
-    "beforeDevCommand": "yarn dev",
+    "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "yarn build",
+    "beforeBuildCommand": "pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -47,14 +47,7 @@
     "resources": [
       "softcam.dll",
       "softcam.lib",
-      "adb/*",
-      "avcodec-62.dll",
-      "avdevice-62.dll",
-      "avfilter-11.dll",
-      "avformat-62.dll",
-      "avutil-60.dll",
-      "swresample-6.dll",
-      "swscale-9.dll"
+      "adb/*"
     ],
     "license": "GPL-3.0",
     "licenseFile": "../../../LICENSE"

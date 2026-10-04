@@ -2,10 +2,12 @@ package com.soubhagyajit.awa.ui.components
 
 import android.util.Log
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.SurfaceHolder
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -45,13 +47,33 @@ fun Preview(
             OpenGlView(context)
         }
 
+        val isPinching = remember { mutableStateOf(false) }
+
+        val scaleDetector = remember {
+            ScaleGestureDetector(context, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                    isPinching.value = true
+                    return true
+                }
+
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    viewModel.pinchZoom(detector.scaleFactor)
+                    return true
+                }
+            })
+        }
+
         AndroidView(
             factory = {
                 openGlView.apply {
                     setOnTouchListener { view, event ->
+                        scaleDetector.onTouchEvent(event)
                         if (event.action == MotionEvent.ACTION_UP) {
-                            viewModel.tapToFocus(view, event)
-                            viewModel.notifyScreenTapped()
+                            if (!isPinching.value) {
+                                viewModel.tapToFocus(view, event)
+                                viewModel.notifyScreenTapped()
+                            }
+                            isPinching.value = false
                         }
                         true
                     }

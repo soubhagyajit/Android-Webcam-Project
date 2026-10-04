@@ -19,6 +19,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -157,6 +158,7 @@ private fun CameraContent(camView: CameraViewModel) {
     val focusMode = settings.focusMode
     val focusDistance = settings.focusDistance
     var showFocusSlider by remember { mutableStateOf(false) }
+    var showZoomSlider by remember { mutableStateOf(false) }
     val ipAddress by remember { mutableStateOf(getLocalIpAddress()) }
 
     // Blank-screen state: draws an opaque black overlay (burn-in safe) and dims the
@@ -197,6 +199,11 @@ private fun CameraContent(camView: CameraViewModel) {
                         )
                     }
                 }
+                .pointerInput(Unit) {
+                    detectTransformGestures { _, _, zoomChange, _ ->
+                        camView.pinchZoom(zoomChange)
+                    }
+                }
         ) {
             Preview(
                 camView,
@@ -235,6 +242,7 @@ private fun CameraContent(camView: CameraViewModel) {
                     TextButton(
                         onClick = {
                             showExposureSlider = !showExposureSlider
+                            showZoomSlider = false
                             Log.d("AWA", "Exposure button tapped")
                         }
                     ) {
@@ -254,6 +262,37 @@ private fun CameraContent(camView: CameraViewModel) {
                                     valueRange = exposureRange.first.toFloat()..exposureRange.last.toFloat(),
                                     modifier = Modifier.width(400.dp)
                                 )
+                            }
+                        }
+                    }
+                }
+                Box {
+                    TextButton(
+                        onClick = {
+                            showZoomSlider = !showZoomSlider
+                            showExposureSlider = false
+                            Log.d("AWA", "Zoom button tapped")
+                        }
+                    ) {
+                        Text("ZOOM")
+                    }
+
+                    if (showZoomSlider) {
+                        Popup (alignment = Alignment.TopStart, offset = IntOffset(0, 120),  onDismissRequest = { showZoomSlider = false }) {
+                            Box(
+                                modifier = Modifier
+                                    .background(Color(0xCC1A1A1A), shape = RoundedCornerShape(8.dp))
+                                    .padding(12.dp)
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("Zoom ${"%.1f".format(settings.zoom)}x", color = Color.White, fontSize = 12.sp)
+                                    Slider(
+                                        value = settings.zoom,
+                                        onValueChange = { camView.setZoom(it) },
+                                        valueRange = settings.zoomMin..maxOf(settings.zoomMax, settings.zoomMin + 0.1f),
+                                        modifier = Modifier.width(300.dp)
+                                    )
+                                }
                             }
                         }
                     }

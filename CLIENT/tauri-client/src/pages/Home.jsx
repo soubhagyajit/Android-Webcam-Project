@@ -2,8 +2,7 @@ import "../App.css";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import Preview from "../components/preview";
 
 function Home() {
@@ -11,7 +10,8 @@ function Home() {
   const [appVersion, setAppVersion] = useState("");
 
   // connection settings
-  const [mode, setMode] = useState("usb");
+  // USB is temporarily the only enabled connection mode.
+  const mode = "usb";
   const [phoneIP, setPhoneIP] = useState("localhost");
 
   const [streamProtocol, setStreamProtocol] = useState("mjpeg");
@@ -70,7 +70,8 @@ function Home() {
     disabled: true,
   });
 
-  const videoRef = useRef(null);
+  const previewChannel = useRef(null);
+  if (!previewChannel.current) previewChannel.current = new Channel();
   const syncSettingsInterval = useRef(null);
   const syncFeaturesInterval = useRef(null);
   const debounceRef = useRef(null);
@@ -95,11 +96,13 @@ function Home() {
       setPhoneIP("127.0.0.1");
       setHttpPort("8080");
       handleGetDevices();
+    /* Wi-Fi mode is temporarily disabled; restore this branch with the selector.
     } else if (mode === "wifi") {
       urlInput.classList.replace("hidden", "flex");
       setPhoneIP("192.168.31.12");
       setHttpPort("8080");
     }
+    */
   }, [mode]);
 
   useEffect(() => {
@@ -222,6 +225,7 @@ function Home() {
       await invoke("start_sender", {
         source: streamProtocol,
         url: targetUrl,
+        onFrame: previewChannel.current,
       });
 
       setIsConnected(true);
@@ -482,14 +486,12 @@ function Home() {
                   </div>
                 </>
               )}
+              {/* Temporarily disabled: USB/Wi-Fi connection mode selector.
               <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
                 Select Mode (USB or WIFI):
               </label>
               <select
                 value={mode}
-                onChange={(e) => {
-                  setMode(e.target.value);
-                }}
                 id="connectionMode"
                 className="w-full bg-slate-800/50 border border-slate-700 rounded-lg p-2 text-sm focus:ring-2 focus:ring-brand-500 outline-none transition-all"
               >
@@ -500,6 +502,8 @@ function Home() {
                   WIFI
                 </option>
               </select>
+              */}
+              {/* Wi-Fi address fields are temporarily disabled with Wi-Fi mode.
               <div className="gap-2 hidden" id="serverURL">
                 <input
                   type="text"
@@ -522,6 +526,7 @@ function Home() {
                   className="w-20 bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand-500 outline-none transition-all"
                 />
               </div>
+              */}
               <div>
                 <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   Select Stream Mode (MJPEG or RTSP):
@@ -816,7 +821,7 @@ function Home() {
               id="videoStreamDiv"
               className={`${isConnected ? "block" : "hidden"} relative w-full h-full flex items-center justify-center`}
             >
-              <Preview isConnected={isConnected} />
+              <Preview isConnected={isConnected} channel={previewChannel.current} />
             </div>
           </div>
 

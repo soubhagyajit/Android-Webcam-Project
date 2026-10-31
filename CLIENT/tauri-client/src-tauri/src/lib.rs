@@ -29,7 +29,8 @@ pub fn run() {
             vc::init_cam, 
             sender::set_hw_decode_enabled, 
             sender::start_sender, 
-            sender::stop_sender])
+            sender::stop_sender,
+            sender::preview_frame_ack])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

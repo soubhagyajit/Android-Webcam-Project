@@ -2,8 +2,7 @@ import "../App.css";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import Preview from "../components/preview";
 
 function Home() {
@@ -70,7 +69,8 @@ function Home() {
     disabled: true,
   });
 
-  const videoRef = useRef(null);
+  const previewChannel = useRef(null);
+  if (!previewChannel.current) previewChannel.current = new Channel();
   const syncSettingsInterval = useRef(null);
   const syncFeaturesInterval = useRef(null);
   const debounceRef = useRef(null);
@@ -222,6 +222,7 @@ function Home() {
       await invoke("start_sender", {
         source: streamProtocol,
         url: targetUrl,
+        onFrame: previewChannel.current,
       });
 
       setIsConnected(true);
@@ -522,6 +523,7 @@ function Home() {
                   className="w-20 bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand-500 outline-none transition-all"
                 />
               </div>
+              {/* Temporarily disabled Stream Mode selector; protocol detection remains active in handleConnect.
               <div>
                 <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   Select Stream Mode (MJPEG or RTSP):
@@ -542,6 +544,7 @@ function Home() {
                   </option>
                 </select>
               </div>
+              */}
             </div>
 
             <div className="grid grid-cols-1 gap-2">
@@ -816,7 +819,7 @@ function Home() {
               id="videoStreamDiv"
               className={`${isConnected ? "block" : "hidden"} relative w-full h-full flex items-center justify-center`}
             >
-              <Preview isConnected={isConnected} />
+              <Preview isConnected={isConnected} channel={previewChannel.current} />
             </div>
           </div>
 

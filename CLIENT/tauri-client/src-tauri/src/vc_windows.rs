@@ -19,6 +19,10 @@ pub enum IncomingFrame {
 
 static LATEST_FRAME: Mutex<Option<IncomingFrame>> = Mutex::new(None);
 
+pub fn is_cam_running() -> bool {
+    CAM_RUNNING.load(Ordering::Relaxed)
+}
+
 #[link(name = "softcam")]
 unsafe extern "system" {
     fn scCreateCamera(width: i32, height: i32, frame_rate: f32) -> *mut c_void;

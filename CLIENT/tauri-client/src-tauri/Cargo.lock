@@ -310,7 +310,6 @@ dependencies = [
 name = "awc"
 version = "1.0.6"
 dependencies = [
- "base64 0.22.1",
  "ffmpeg-next",
  "ffmpeg-sys-next",
  "image",

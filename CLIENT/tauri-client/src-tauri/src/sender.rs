@@ -1,23 +1,23 @@
 // sender.rs — middleman between the phone stream and vc.rs / UI preview.
 
-use crate::vc::{push_frame, IncomingFrame};
-use base64::engine::general_purpose;
-use base64::Engine as _;
+use crate::vc::{is_cam_running, push_frame, IncomingFrame};
 use ffmpeg_next as ff;
 use ffmpeg_sys_next as ffi;
 use image::{ImageFormat, RgbImage};
 use serde::Deserialize;
 use std::io::{Cursor, Read};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::ipc::{Channel, InvokeResponseBody};
 
 static SENDER_RUNNING: AtomicBool = AtomicBool::new(false);
 static SENDER_THREAD: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+static PREVIEW_FRAME_PENDING: AtomicU32 = AtomicU32::new(0);
+static NEXT_PREVIEW_FRAME_ID: AtomicU32 = AtomicU32::new(1);
 
 static HW_DECODE_ENABLED: AtomicBool = AtomicBool::new(true);
 static HW_DECODE_FAILED_THIS_SESSION: AtomicBool = AtomicBool::new(false);
@@ -30,14 +30,48 @@ struct UiFrame {
     height: u32,
 }
 
-fn spawn_ui_encoder(app: AppHandle) -> SyncSender<UiFrame> {
+fn send_preview_frame(channel: &Channel<InvokeResponseBody>, jpeg: &[u8]) {
+    let frame_id = NEXT_PREVIEW_FRAME_ID.fetch_add(1, Ordering::Relaxed).max(1);
+    if PREVIEW_FRAME_PENDING
+        .compare_exchange(0, frame_id, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+
+    // Prefix the binary JPEG with a small sequence id so an acknowledgement
+    // from an older connection cannot release a newer frame.
+    let mut payload = Vec::with_capacity(4 + jpeg.len());
+    payload.extend_from_slice(&frame_id.to_le_bytes());
+    payload.extend_from_slice(jpeg);
+    if channel.send(InvokeResponseBody::Raw(payload)).is_err() {
+        let _ = PREVIEW_FRAME_PENDING.compare_exchange(
+            frame_id,
+            0,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        );
+    }
+}
+
+#[tauri::command]
+pub fn preview_frame_ack(frame_id: u32) {
+    let _ = PREVIEW_FRAME_PENDING.compare_exchange(
+        frame_id,
+        0,
+        Ordering::AcqRel,
+        Ordering::Relaxed,
+    );
+}
+
+fn spawn_ui_encoder(channel: Channel<InvokeResponseBody>) -> SyncSender<UiFrame> {
     let (tx, rx) = sync_channel::<UiFrame>(1);
 
     thread::spawn(move || {
         let mut last_emit = Instant::now();
 
         while let Ok(frame) = rx.recv() {
-            if last_emit.elapsed() < Duration::from_millis(33) {
+            if last_emit.elapsed() < Duration::from_millis(66) {
                 continue;
             }
 
@@ -49,8 +83,8 @@ fn spawn_ui_encoder(app: AppHandle) -> SyncSender<UiFrame> {
             if let Some(img_buffer) = RgbImage::from_raw(frame.width, frame.height, rgb_bytes) {
                 let mut jpeg_bytes = Cursor::new(Vec::new());
                 if img_buffer.write_to(&mut jpeg_bytes, ImageFormat::Jpeg).is_ok() {
-                    let b64 = general_purpose::STANDARD.encode(jpeg_bytes.into_inner());
-                    let _ = app.emit("frame-update", b64);
+                    let jpeg = jpeg_bytes.into_inner();
+                    send_preview_frame(&channel, &jpeg);
                     last_emit = Instant::now();
                 }
             }
@@ -74,17 +108,22 @@ pub enum StreamSource {
 }
 
 #[tauri::command]
-pub fn start_sender(app: AppHandle, source: StreamSource, url: String) {
+pub fn start_sender(
+    source: StreamSource,
+    url: String,
+    on_frame: Channel<InvokeResponseBody>,
+) {
     println!("sender: starting stream from {} at {}", source as u8, url);
     if SENDER_RUNNING.load(Ordering::Relaxed) {
         return;
     }
     SENDER_RUNNING.store(true, Ordering::Relaxed);
+    PREVIEW_FRAME_PENDING.store(0, Ordering::Relaxed);
     HW_DECODE_FAILED_THIS_SESSION.store(false, Ordering::Relaxed);
 
     let handle = thread::spawn(move || match source {
-        StreamSource::Mjpeg => run_mjpeg(app, url),
-        StreamSource::Rtsp => run_rtsp(app, url),
+        StreamSource::Mjpeg => run_mjpeg(on_frame, url),
+        StreamSource::Rtsp => run_rtsp(on_frame, url),
     });
     *SENDER_THREAD.lock().unwrap() = Some(handle);
 }
@@ -92,6 +131,7 @@ pub fn start_sender(app: AppHandle, source: StreamSource, url: String) {
 #[tauri::command]
 pub fn stop_sender() {
     SENDER_RUNNING.store(false, Ordering::Relaxed);
+    PREVIEW_FRAME_PENDING.store(0, Ordering::Relaxed);
     
     // FIX 1: Offload thread join to background worker so Tauri's main UI thread never blocks
     thread::spawn(|| {
@@ -152,7 +192,7 @@ fn read_next_jpeg(
     Some(jpeg)
 }
 
-fn run_mjpeg(app: AppHandle, url: String) {
+fn run_mjpeg(on_frame: Channel<InvokeResponseBody>, url: String) {
     println!("sender: connecting to MJPEG at {url}");
     
     // FIX 2: Add socket read & connection timeouts to MJPEG HTTP client
@@ -176,6 +216,7 @@ fn run_mjpeg(app: AppHandle, url: String) {
 
     let mut buffer: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 16384];
+    let mut last_preview_emit = Instant::now() - Duration::from_millis(66);
 
     while SENDER_RUNNING.load(Ordering::Relaxed) {
         let Some(jpeg) = read_next_jpeg(&mut reader, &mut buffer, &mut chunk) else {
@@ -183,10 +224,16 @@ fn run_mjpeg(app: AppHandle, url: String) {
             break;
         };
 
-        push_frame(IncomingFrame::Jpeg(jpeg.clone()));
+        if is_cam_running() {
+            push_frame(IncomingFrame::Jpeg(jpeg.clone()));
+        }
 
-        let b64 = general_purpose::STANDARD.encode(&jpeg);
-        let _ = app.emit("frame-update", b64);
+        // Keep the preview rate bounded; the acknowledgement also ensures at
+        // most one full-size frame is in flight to the WebView.
+        if last_preview_emit.elapsed() >= Duration::from_millis(66) {
+            send_preview_frame(&on_frame, &jpeg);
+            last_preview_emit = Instant::now();
+        }
     }
 
     SENDER_RUNNING.store(false, Ordering::Relaxed);
@@ -287,7 +334,7 @@ fn open_rtsp_stream(
     Ok((ictx, video_stream_index, decoder))
 }
 
-fn run_rtsp(app: AppHandle, url: String) {
+fn run_rtsp(on_frame: Channel<InvokeResponseBody>, url: String) {
     ff::init().expect("ffmpeg init failed");
     let hwaccel_type = ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA;
 
@@ -295,7 +342,7 @@ fn run_rtsp(app: AppHandle, url: String) {
         && !HW_DECODE_FAILED_THIS_SESSION.load(Ordering::Relaxed);
 
     let mut sws_ctx: Option<ff::software::scaling::Context> = None;
-    let ui_tx = spawn_ui_encoder(app);
+    let ui_tx = spawn_ui_encoder(on_frame);
 
     'reconnect: while SENDER_RUNNING.load(Ordering::Relaxed) {
         let (mut ictx, video_stream_index, mut decoder) =
@@ -375,7 +422,9 @@ fn run_rtsp(app: AppHandle, url: String) {
 
                 let bgr_bytes = bgr_frame.data(0).to_vec();
 
-                push_frame(IncomingFrame::RawBgr(bgr_bytes.clone()));
+                if is_cam_running() {
+                    push_frame(IncomingFrame::RawBgr(bgr_bytes.clone()));
+                }
 
                 let _ = ui_tx.try_send(UiFrame {
                     bgr_data: bgr_bytes,

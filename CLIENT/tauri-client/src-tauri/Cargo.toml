@@ -29,7 +29,6 @@ tauri-plugin-process = "2"
 tauri-plugin-store = "2"
 ffmpeg-next = "8.1.0"
 ffmpeg-sys-next = "8.1.0"
-base64 = "0.22"
 tokio = { version = "1", features = ["process", "macros"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 v4l = "0.14"

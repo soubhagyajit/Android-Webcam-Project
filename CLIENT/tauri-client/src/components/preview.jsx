@@ -1,17 +1,43 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-export default function Preview({ isConnected, channel }) {
+export default function Preview({ phoneConnected, feedActive, cameraEnabled, width, height, channel }) {
   const videoRef = useRef(null);
-  const isConnectedRef = useRef(isConnected);
+  const phoneConnectedRef = useRef(phoneConnected);
+  const [hasLiveFrame, setHasLiveFrame] = useState(false);
 
   useEffect(() => {
-    isConnectedRef.current = isConnected;
-    if (!isConnected && videoRef.current) {
-      videoRef.current.width = 0;
-      videoRef.current.height = 0;
-    }
-  }, [isConnected]);
+    phoneConnectedRef.current = phoneConnected;
+  }, [phoneConnected]);
+
+  useEffect(() => {
+    if (!feedActive) setHasLiveFrame(false);
+  }, [feedActive]);
+
+  useEffect(() => {
+    if (!cameraEnabled || hasLiveFrame || !videoRef.current) return;
+    const canvas = videoRef.current;
+    canvas.width = Math.max(1, width || 1280);
+    canvas.height = Math.max(1, height || 720);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.fillStyle = "#181818";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const unit = Math.min(canvas.width, canvas.height);
+    const panelHeight = Math.floor(unit * 0.2);
+    ctx.fillStyle = "#1b1f2b";
+    ctx.fillRect(canvas.width * 0.1, (canvas.height - panelHeight) / 2, canvas.width * 0.8, panelHeight);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const titleSize = Math.max(12, Math.floor(unit * 0.044));
+    const subtitleSize = Math.max(10, Math.floor(unit * 0.027));
+    ctx.font = `500 ${titleSize}px Arial, sans-serif`;
+    ctx.fillStyle = "#dce1ee";
+    ctx.fillText("CAMERA ACTIVE", canvas.width / 2, canvas.height / 2 - titleSize * 0.65, canvas.width * 0.76);
+    ctx.font = `400 ${subtitleSize}px Arial, sans-serif`;
+    ctx.fillStyle = "#82a5e6";
+    ctx.fillText("WAITING FOR PHONE FEED", canvas.width / 2, canvas.height / 2 + titleSize * 0.75, canvas.width * 0.76);
+  }, [cameraEnabled, hasLiveFrame, width, height]);
 
   useEffect(() => {
     let decoding = false;
@@ -26,20 +52,21 @@ export default function Preview({ isConnected, channel }) {
       let bitmap;
 
       try {
-        if (disposed || !isConnectedRef.current || decoding || bytes.byteLength <= 4) {
+        if (disposed || !phoneConnectedRef.current || decoding || bytes.byteLength <= 4) {
           return;
         }
         decoding = true;
         bitmap = await createImageBitmap(
           new Blob([bytes.subarray(4)], { type: "image/jpeg" }),
         );
-        if (!disposed && isConnectedRef.current && videoRef.current) {
+        if (!disposed && phoneConnectedRef.current && videoRef.current) {
           const canvas = videoRef.current;
           if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
             canvas.width = bitmap.width;
             canvas.height = bitmap.height;
           }
           canvas.getContext("2d")?.drawImage(bitmap, 0, 0);
+          setHasLiveFrame(true);
         }
       } catch (error) {
         console.error("Failed to render preview frame:", error);
@@ -67,9 +94,7 @@ export default function Preview({ isConnected, channel }) {
   return (
     <div
       id="videoStreamDiv"
-      className={`${
-        isConnected ? "block" : "hidden"
-      } relative w-full h-full flex items-center justify-center`}
+      className={`${feedActive || cameraEnabled ? "flex" : "hidden"} relative w-full h-full items-center justify-center`}
     >
       <canvas
         ref={videoRef}

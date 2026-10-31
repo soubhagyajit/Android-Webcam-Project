@@ -23,6 +23,9 @@ pub fn is_cam_running() -> bool {
     CAM_RUNNING.load(Ordering::Relaxed)
 }
 
+#[tauri::command]
+pub fn cam_client_connected() -> bool { CAM_RUNNING.load(Ordering::Relaxed) }
+
 /// Overwrites LATEST_FRAME with the latest payload sent by sender.rs
 pub fn push_frame(frame: IncomingFrame) {
     *LATEST_FRAME.lock().unwrap() = Some(frame);

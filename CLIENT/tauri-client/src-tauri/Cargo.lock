@@ -308,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "awc"
-version = "1.0.6"
+version = "1.0.6+1"
 dependencies = [
  "ffmpeg-next",
  "ffmpeg-sys-next",

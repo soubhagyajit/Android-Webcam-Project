@@ -1,6 +1,6 @@
 // sender.rs — middleman between the phone stream and vc.rs / UI preview.
 
-use crate::vc::{is_cam_running, push_frame, IncomingFrame};
+use crate::vc::{cam_client_connected, is_cam_running, push_frame, IncomingFrame};
 use ffmpeg_next as ff;
 use ffmpeg_sys_next as ffi;
 use image::{ImageFormat, RgbImage};
@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use tauri::ipc::{Channel, InvokeResponseBody};
 
 static SENDER_RUNNING: AtomicBool = AtomicBool::new(false);
+static SENDER_STOPPING: AtomicBool = AtomicBool::new(false);
 static SENDER_THREAD: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 static PREVIEW_FRAME_PENDING: AtomicU32 = AtomicU32::new(0);
 static NEXT_PREVIEW_FRAME_ID: AtomicU32 = AtomicU32::new(1);
@@ -112,10 +113,10 @@ pub fn start_sender(
     source: StreamSource,
     url: String,
     on_frame: Channel<InvokeResponseBody>,
-) {
+) -> bool {
     println!("sender: starting stream from {} at {}", source as u8, url);
-    if SENDER_RUNNING.load(Ordering::Relaxed) {
-        return;
+    if SENDER_RUNNING.load(Ordering::Relaxed) || SENDER_STOPPING.load(Ordering::Acquire) {
+        return false;
     }
     SENDER_RUNNING.store(true, Ordering::Relaxed);
     PREVIEW_FRAME_PENDING.store(0, Ordering::Relaxed);
@@ -126,18 +127,21 @@ pub fn start_sender(
         StreamSource::Rtsp => run_rtsp(on_frame, url),
     });
     *SENDER_THREAD.lock().unwrap() = Some(handle);
+    true
 }
 
 #[tauri::command]
 pub fn stop_sender() {
     SENDER_RUNNING.store(false, Ordering::Relaxed);
     PREVIEW_FRAME_PENDING.store(0, Ordering::Relaxed);
+    if SENDER_STOPPING.swap(true, Ordering::AcqRel) { return; }
     
     // FIX 1: Offload thread join to background worker so Tauri's main UI thread never blocks
     thread::spawn(|| {
         if let Some(handle) = SENDER_THREAD.lock().unwrap().take() {
             let _ = handle.join();
         }
+        SENDER_STOPPING.store(false, Ordering::Release);
     });
 }
 
@@ -224,7 +228,7 @@ fn run_mjpeg(on_frame: Channel<InvokeResponseBody>, url: String) {
             break;
         };
 
-        if is_cam_running() {
+        if is_cam_running() && cam_client_connected() {
             push_frame(IncomingFrame::Jpeg(jpeg.clone()));
         }
 
@@ -422,7 +426,7 @@ fn run_rtsp(on_frame: Channel<InvokeResponseBody>, url: String) {
 
                 let bgr_bytes = bgr_frame.data(0).to_vec();
 
-                if is_cam_running() {
+                if is_cam_running() && cam_client_connected() {
                     push_frame(IncomingFrame::RawBgr(bgr_bytes.clone()));
                 }
 

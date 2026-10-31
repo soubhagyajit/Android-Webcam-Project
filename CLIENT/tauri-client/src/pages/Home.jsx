@@ -32,6 +32,8 @@ function Home() {
   const [isConnected, setIsConnected] = useState(false);
   const [modeIndicator, setModeIndicator] = useState("standby");
   const [vc, setVc] = useState(false);
+  const [previewActive, setPreviewActive] = useState(false);
+  const [feedActive, setFeedActive] = useState(false);
 
   // UI states
   const [connectButtonText, setConnectButtonText] = useState("Connect");
@@ -74,6 +76,11 @@ function Home() {
   const syncSettingsInterval = useRef(null);
   const syncFeaturesInterval = useRef(null);
   const debounceRef = useRef(null);
+  const streamConfigRef = useRef(null);
+  const feedActiveRef = useRef(false);
+  const feedTransitionRef = useRef(false);
+  const cameraIdleSinceRef = useRef(null);
+  const previewTimerRef = useRef(null);
 
   // Tracking interaction state via refs to avoid stale closures in setInterval
   const isDraggingFocus = useRef(false);
@@ -140,6 +147,49 @@ function Home() {
     };
     applyResolutionChange();
   }, [streamData.width, streamData.height]);
+
+  // Pull from the phone only while Softcam has a consumer or the user has
+  // explicitly enabled the short preview window.
+  useEffect(() => {
+    let disposed = false;
+    const syncFeedDemand = async () => {
+      if (disposed || feedTransitionRef.current) return;
+      const config = streamConfigRef.current;
+      let cameraInUse = false;
+      if (isConnected && vc) {
+        try { cameraInUse = await invoke("cam_client_connected"); } catch (_) {}
+      }
+      if (cameraInUse) cameraIdleSinceRef.current = null;
+      else if (cameraIdleSinceRef.current === null) cameraIdleSinceRef.current = Date.now();
+      const cameraUseGrace = feedActiveRef.current && vc && cameraIdleSinceRef.current !== null && Date.now() - cameraIdleSinceRef.current < 1500;
+      const wanted = !!config && isConnected && (previewActive || cameraInUse || cameraUseGrace);
+      if (wanted === feedActiveRef.current) return;
+      feedTransitionRef.current = true;
+      try {
+        if (wanted) {
+          const started = await invoke("start_sender", {
+            source: config.source,
+            url: config.url,
+            onFrame: previewChannel.current,
+          });
+          if (!started) return;
+          feedActiveRef.current = true;
+          setFeedActive(true);
+          updateStatus(previewActive ? "Preview live" : "Virtual camera live", "active");
+        } else {
+          await invoke("stop_sender");
+          feedActiveRef.current = false;
+          setFeedActive(false);
+          if (isConnected) updateStatus("Connected · waiting for camera use", "idle");
+        }
+      } finally {
+        feedTransitionRef.current = false;
+      }
+    };
+    syncFeedDemand();
+    const timer = setInterval(syncFeedDemand, 400);
+    return () => { disposed = true; clearInterval(timer); };
+  }, [isConnected, vc, previewActive]);
 
   const handleGetDevices = async () => {
     setDevicesLoading(true);
@@ -214,23 +264,14 @@ function Home() {
         targetUrl = `rtsp://${phoneIP}:${rtspPort}`;
       }
 
-      updateStatus(
-        `Starting ${streamProtocol.toUpperCase()} stream...`,
-        "idle",
-      );
-
-      await invoke("start_sender", {
-        source: streamProtocol,
-        url: targetUrl,
-        onFrame: previewChannel.current,
-      });
+      streamConfigRef.current = { source: isRtsp ? "rtsp" : "mjpeg", url: targetUrl };
 
       setIsConnected(true);
       setShowControls(true);
       setConnectButtonDisable(false);
       setConnectButtonText("Disconnect");
       setModeIndicator("streaming");
-      updateStatus(`Feed Live (${streamProtocol.toUpperCase()})`, "active");
+      updateStatus("Connected · waiting for camera use", "idle");
 
       if (features.resolutions) {
         setResolutions(features.resolutions);
@@ -251,7 +292,12 @@ function Home() {
     setConnectButtonText("Connect");
     setShowControls(false);
 
-    // Tell sender.rs to stop
+    streamConfigRef.current = null;
+    setPreviewActive(false);
+    if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
+    previewTimerRef.current = null;
+    feedActiveRef.current = false;
+    setFeedActive(false);
     await invoke("stop_sender");
 
     if (syncSettingsInterval.current || syncFeaturesInterval.current) {
@@ -262,6 +308,16 @@ function Home() {
     }
 
     updateStatus("Disconnected", "idle");
+  };
+
+  const handlePreviewToggle = () => {
+    if (!isConnected) return;
+    if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
+    setPreviewActive(true);
+    previewTimerRef.current = setTimeout(() => {
+      setPreviewActive(false);
+      previewTimerRef.current = null;
+    }, 30_000);
   };
   const initializeDeviceSync = async () => {
     await fetchFeatures();
@@ -787,7 +843,7 @@ function Home() {
           <div className="flex-1 flex items-center justify-center p-8">
             <div
               id="placeholder"
-              className={`${isConnected ? "hidden" : "block"} max-w-md text-center space-y-6`}
+              className={`${isConnected || vc || previewActive ? "hidden" : "block"} max-w-md text-center space-y-6`}
             >
               <div className="w-20 h-20 bg-slate-800/50 rounded-3xl mx-auto flex items-center justify-center border border-slate-700">
                 <svg
@@ -817,10 +873,25 @@ function Home() {
 
             <div
               id="videoStreamDiv"
-              className={`${isConnected ? "block" : "hidden"} relative w-full h-full flex items-center justify-center`}
+              className={`${isConnected || vc ? "flex" : "hidden"} relative w-full h-full items-center justify-center`}
             >
-              <Preview isConnected={isConnected} channel={previewChannel.current} />
+              <Preview
+                phoneConnected={isConnected}
+                feedActive={feedActive}
+                cameraEnabled={vc || previewActive}
+                width={streamData.width}
+                height={streamData.height}
+                channel={previewChannel.current}
+              />
             </div>
+            {isConnected && (
+              <button
+                onClick={handlePreviewToggle}
+                className="absolute top-5 right-5 z-10 rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-2 text-xs text-slate-200 hover:border-brand-500/60"
+              >
+                {previewActive ? "Preview on · 30s" : "Preview for 30s"}
+              </button>
+            )}
           </div>
 
           <div

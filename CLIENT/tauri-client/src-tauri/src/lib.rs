@@ -27,6 +27,7 @@ pub fn run() {
             adb::adb_get_devices, 
             adb::adb_connect_device, 
             vc::init_cam, 
+            vc::cam_client_connected,
             sender::set_hw_decode_enabled, 
             sender::start_sender, 
             sender::stop_sender,

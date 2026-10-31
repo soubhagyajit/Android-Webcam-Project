@@ -1,6 +1,6 @@
 [package]
 name = "awc"
-version = "1.0.6"
+version = "1.0.6+1"
 description = "Android Webcam Software - Desktop client"
 authors = ["Soubhagyajit Borah"]
 edition = "2024"

@@ -1,27 +1,50 @@
 // sender.rs — middleman between the phone stream and vc.rs / UI preview.
 
-use crate::vc::{cam_client_connected, is_cam_running, push_frame, IncomingFrame};
+use crate::vc::{cam_client_connected, is_cam_active, is_cam_running, push_frame, IncomingFrame};
 use ffmpeg_next as ff;
 use ffmpeg_sys_next as ffi;
 use image::{ImageFormat, RgbImage};
 use serde::Deserialize;
 use std::io::{Cursor, Read};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::ipc::{Channel, InvokeResponseBody};
 
 static SENDER_RUNNING: AtomicBool = AtomicBool::new(false);
 static SENDER_STOPPING: AtomicBool = AtomicBool::new(false);
 static SENDER_THREAD: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 static PREVIEW_FRAME_PENDING: AtomicU32 = AtomicU32::new(0);
+static PREVIEW_PENDING_SINCE_MS: AtomicU64 = AtomicU64::new(0);
 static NEXT_PREVIEW_FRAME_ID: AtomicU32 = AtomicU32::new(1);
+static PREVIEW_ENABLED: AtomicBool = AtomicBool::new(false);
+static LAST_SENDER_END_REASON: Mutex<String> = Mutex::new(String::new());
 
 static HW_DECODE_ENABLED: AtomicBool = AtomicBool::new(true);
 static HW_DECODE_FAILED_THIS_SESSION: AtomicBool = AtomicBool::new(false);
+
+#[tauri::command]
+pub fn sender_is_running() -> bool {
+    SENDER_RUNNING.load(Ordering::Acquire)
+}
+
+#[tauri::command]
+pub fn sender_is_stopping() -> bool {
+    SENDER_STOPPING.load(Ordering::Acquire)
+}
+
+#[tauri::command]
+pub fn sender_last_end_reason() -> String {
+    LAST_SENDER_END_REASON.lock().unwrap().clone()
+}
+
+fn set_sender_end_reason(reason: impl Into<String>) {
+    *LAST_SENDER_END_REASON.lock().unwrap() = reason.into();
+}
 
 static mut HW_PIX_FMT: ffi::AVPixelFormat = ffi::AVPixelFormat::AV_PIX_FMT_NONE;
 
@@ -32,6 +55,21 @@ struct UiFrame {
 }
 
 fn send_preview_frame(channel: &Channel<InvokeResponseBody>, jpeg: &[u8]) {
+    if !PREVIEW_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let pending = PREVIEW_FRAME_PENDING.load(Ordering::Acquire);
+    let pending_since = PREVIEW_PENDING_SINCE_MS.load(Ordering::Relaxed);
+    if pending != 0 && now_ms.saturating_sub(pending_since) > 1500 {
+        let _ =
+            PREVIEW_FRAME_PENDING.compare_exchange(pending, 0, Ordering::AcqRel, Ordering::Relaxed);
+    }
+
     let frame_id = NEXT_PREVIEW_FRAME_ID.fetch_add(1, Ordering::Relaxed).max(1);
     if PREVIEW_FRAME_PENDING
         .compare_exchange(0, frame_id, Ordering::AcqRel, Ordering::Relaxed)
@@ -39,6 +77,7 @@ fn send_preview_frame(channel: &Channel<InvokeResponseBody>, jpeg: &[u8]) {
     {
         return;
     }
+    PREVIEW_PENDING_SINCE_MS.store(now_ms, Ordering::Release);
 
     // Prefix the binary JPEG with a small sequence id so an acknowledgement
     // from an older connection cannot release a newer frame.
@@ -52,17 +91,30 @@ fn send_preview_frame(channel: &Channel<InvokeResponseBody>, jpeg: &[u8]) {
             Ordering::AcqRel,
             Ordering::Relaxed,
         );
+        PREVIEW_PENDING_SINCE_MS.store(0, Ordering::Release);
     }
 }
 
 #[tauri::command]
 pub fn preview_frame_ack(frame_id: u32) {
-    let _ = PREVIEW_FRAME_PENDING.compare_exchange(
-        frame_id,
-        0,
-        Ordering::AcqRel,
-        Ordering::Relaxed,
-    );
+    if PREVIEW_FRAME_PENDING
+        .compare_exchange(frame_id, 0, Ordering::AcqRel, Ordering::Relaxed)
+        .is_ok()
+    {
+        PREVIEW_PENDING_SINCE_MS.store(0, Ordering::Release);
+    }
+}
+
+#[tauri::command]
+pub fn refresh_preview_channel() {
+    PREVIEW_FRAME_PENDING.store(0, Ordering::Release);
+    PREVIEW_PENDING_SINCE_MS.store(0, Ordering::Release);
+}
+
+#[tauri::command]
+pub fn set_preview_enabled(enabled: bool) {
+    PREVIEW_ENABLED.store(enabled, Ordering::Release);
+    refresh_preview_channel();
 }
 
 fn spawn_ui_encoder(channel: Channel<InvokeResponseBody>) -> SyncSender<UiFrame> {
@@ -72,6 +124,10 @@ fn spawn_ui_encoder(channel: Channel<InvokeResponseBody>) -> SyncSender<UiFrame>
         let mut last_emit = Instant::now();
 
         while let Ok(frame) = rx.recv() {
+            if !PREVIEW_ENABLED.load(Ordering::Acquire) {
+                continue;
+            }
+
             if last_emit.elapsed() < Duration::from_millis(66) {
                 continue;
             }
@@ -83,7 +139,10 @@ fn spawn_ui_encoder(channel: Channel<InvokeResponseBody>) -> SyncSender<UiFrame>
 
             if let Some(img_buffer) = RgbImage::from_raw(frame.width, frame.height, rgb_bytes) {
                 let mut jpeg_bytes = Cursor::new(Vec::new());
-                if img_buffer.write_to(&mut jpeg_bytes, ImageFormat::Jpeg).is_ok() {
+                if img_buffer
+                    .write_to(&mut jpeg_bytes, ImageFormat::Jpeg)
+                    .is_ok()
+                {
                     let jpeg = jpeg_bytes.into_inner();
                     send_preview_frame(&channel, &jpeg);
                     last_emit = Instant::now();
@@ -98,7 +157,10 @@ fn spawn_ui_encoder(channel: Channel<InvokeResponseBody>) -> SyncSender<UiFrame>
 #[tauri::command]
 pub fn set_hw_decode_enabled(enabled: bool) {
     HW_DECODE_ENABLED.store(enabled, Ordering::Relaxed);
-    println!("sender: hardware decode {}", if enabled { "enabled" } else { "disabled" });
+    println!(
+        "sender: hardware decode {}",
+        if enabled { "enabled" } else { "disabled" }
+    );
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Deserialize)]
@@ -119,7 +181,9 @@ pub fn start_sender(
         return false;
     }
     SENDER_RUNNING.store(true, Ordering::Relaxed);
+    set_sender_end_reason("running");
     PREVIEW_FRAME_PENDING.store(0, Ordering::Relaxed);
+    PREVIEW_PENDING_SINCE_MS.store(0, Ordering::Relaxed);
     HW_DECODE_FAILED_THIS_SESSION.store(false, Ordering::Relaxed);
 
     let handle = thread::spawn(move || match source {
@@ -133,9 +197,13 @@ pub fn start_sender(
 #[tauri::command]
 pub fn stop_sender() {
     SENDER_RUNNING.store(false, Ordering::Relaxed);
+    set_sender_end_reason("stop requested by client");
     PREVIEW_FRAME_PENDING.store(0, Ordering::Relaxed);
-    if SENDER_STOPPING.swap(true, Ordering::AcqRel) { return; }
-    
+    PREVIEW_PENDING_SINCE_MS.store(0, Ordering::Relaxed);
+    if SENDER_STOPPING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+
     // FIX 1: Offload thread join to background worker so Tauri's main UI thread never blocks
     thread::spawn(|| {
         if let Some(handle) = SENDER_THREAD.lock().unwrap().take() {
@@ -163,15 +231,15 @@ fn read_next_jpeg(
     reader: &mut impl Read,
     buffer: &mut Vec<u8>,
     chunk: &mut [u8],
-) -> Option<Vec<u8>> {
+) -> std::io::Result<Option<Vec<u8>>> {
     const HEADER_MARKER: [u8; 4] = [13, 10, 13, 10];
     let header_end = loop {
         if let Some(pos) = find_marker(buffer, &HEADER_MARKER) {
             break pos;
         }
-        let n = reader.read(chunk).ok()?;
+        let n = reader.read(chunk)?;
         if n == 0 {
-            return None;
+            return Ok(None);
         }
         buffer.extend_from_slice(&chunk[..n]);
     };
@@ -179,43 +247,65 @@ fn read_next_jpeg(
     let header_text = String::from_utf8_lossy(&buffer[0..header_end]);
     let content_length: usize = header_text
         .lines()
-        .find_map(|line| line.strip_prefix("Content-Length: "))
-        .and_then(|v| v.parse().ok())?;
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().ok())
+                .flatten()
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "MJPEG part has no valid Content-Length",
+            )
+        })?;
 
     let frame_len = header_end + 4 + content_length;
     while buffer.len() < frame_len {
-        let n = reader.read(chunk).ok()?;
+        let n = reader.read(chunk)?;
         if n == 0 {
-            return None;
+            return Ok(None);
         }
         buffer.extend_from_slice(&chunk[..n]);
     }
 
     let jpeg = buffer[(header_end + 4)..frame_len].to_vec();
     buffer.drain(..frame_len);
-    Some(jpeg)
+    Ok(Some(jpeg))
 }
 
 fn run_mjpeg(on_frame: Channel<InvokeResponseBody>, url: String) {
     println!("sender: connecting to MJPEG at {url}");
-    
-    // FIX 2: Add socket read & connection timeouts to MJPEG HTTP client
+
+    // MJPEG responses are long-lived streams: a request timeout would close
+    // and reopen the phone camera feed periodically. Only bound connection
+    // establishment; once connected, read until the stream closes or Stop is
+    // requested.
     let client = match reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(3))
         .connect_timeout(Duration::from_secs(3))
-        .build() 
+        .build()
     {
         Ok(c) => c,
-        Err(_) => {
+        Err(error) => {
+            set_sender_end_reason(format!("could not create MJPEG client: {error}"));
             SENDER_RUNNING.store(false, Ordering::Relaxed);
             return;
         }
     };
 
-    let Ok(mut reader) = client.get(&url).send() else {
-        println!("sender: failed to connect to MJPEG source");
-        SENDER_RUNNING.store(false, Ordering::Relaxed);
-        return;
+    let mut reader = match client
+        .get(&url)
+        .send()
+        .and_then(|response| response.error_for_status())
+    {
+        Ok(response) => response,
+        Err(error) => {
+            println!("sender: failed to connect to MJPEG source {url}: {error}");
+            set_sender_end_reason(format!("MJPEG connect failed: {error}"));
+            SENDER_RUNNING.store(false, Ordering::Release);
+            return;
+        }
     };
 
     let mut buffer: Vec<u8> = Vec::new();
@@ -223,12 +313,29 @@ fn run_mjpeg(on_frame: Channel<InvokeResponseBody>, url: String) {
     let mut last_preview_emit = Instant::now() - Duration::from_millis(66);
 
     while SENDER_RUNNING.load(Ordering::Relaxed) {
-        let Some(jpeg) = read_next_jpeg(&mut reader, &mut buffer, &mut chunk) else {
-            println!("sender: MJPEG stream ended or errored");
-            break;
+        let jpeg = match read_next_jpeg(&mut reader, &mut buffer, &mut chunk) {
+            Ok(Some(jpeg)) => jpeg,
+            Ok(None) => {
+                println!("sender: MJPEG stream ended");
+                set_sender_end_reason("MJPEG response ended");
+                break;
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => {
+                println!("sender: MJPEG stream read failed: {error}");
+                set_sender_end_reason(format!("MJPEG read failed: {error}"));
+                break;
+            }
         };
 
-        if is_cam_running() && cam_client_connected() {
+        if is_cam_running() && is_cam_active() && cam_client_connected() {
             push_frame(IncomingFrame::Jpeg(jpeg.clone()));
         }
 
@@ -240,6 +347,9 @@ fn run_mjpeg(on_frame: Channel<InvokeResponseBody>, url: String) {
         }
     }
 
+    if !SENDER_RUNNING.load(Ordering::Acquire) {
+        set_sender_end_reason("stop requested by client");
+    }
     SENDER_RUNNING.store(false, Ordering::Relaxed);
 }
 
@@ -288,8 +398,13 @@ unsafe fn try_attach_hw(
     };
 
     let mut hw_device_ctx: *mut ffi::AVBufferRef = ptr::null_mut();
-    let ret =
-        ffi::av_hwdevice_ctx_create(&mut hw_device_ctx, hwaccel_type, ptr::null(), ptr::null_mut(), 0);
+    let ret = ffi::av_hwdevice_ctx_create(
+        &mut hw_device_ctx,
+        hwaccel_type,
+        ptr::null(),
+        ptr::null_mut(),
+        0,
+    );
     if ret < 0 {
         return false;
     }
@@ -307,9 +422,9 @@ fn open_rtsp_stream(
     hwaccel_type: ffi::AVHWDeviceType,
 ) -> Result<(ff::format::context::Input, usize, ff::decoder::Video), ff::Error> {
     let mut opts = ff::Dictionary::new();
-    
+
     opts.set("rtsp_transport", "tcp");
-    
+
     // FIX 3: 3-second socket timeout (in microseconds) so FFmpeg breaks out on drop
     opts.set("stimeout", "3000000");
 
@@ -322,8 +437,7 @@ fn open_rtsp_stream(
     let video_stream_index = video_stream.index();
     let codec_params = video_stream.parameters();
 
-    let decoder_codec =
-        ff::decoder::find(codec_params.id()).expect("no H.264 decoder available");
+    let decoder_codec = ff::decoder::find(codec_params.id()).expect("no H.264 decoder available");
 
     let context = ff::codec::context::Context::from_parameters(codec_params)?;
     let mut decoder = context.decoder().video()?;
@@ -354,11 +468,15 @@ fn run_rtsp(on_frame: Channel<InvokeResponseBody>, url: String) {
                 Ok(v) => v,
                 Err(e) => {
                     println!("sender: failed to open RTSP stream: {e}");
+                    set_sender_end_reason(format!("RTSP connect failed: {e}"));
                     break;
                 }
             };
 
-        println!("sender: RTSP decode running ({})", if use_hw { "hardware" } else { "software" });
+        println!(
+            "sender: RTSP decode running ({})",
+            if use_hw { "hardware" } else { "software" }
+        );
 
         for (stream, packet) in ictx.packets() {
             if !SENDER_RUNNING.load(Ordering::Relaxed) {
@@ -370,7 +488,9 @@ fn run_rtsp(on_frame: Channel<InvokeResponseBody>, url: String) {
 
             if decoder.send_packet(&packet).is_err() {
                 if use_hw {
-                    println!("sender: hardware decode rejected this stream — falling back to software");
+                    println!(
+                        "sender: hardware decode rejected this stream — falling back to software"
+                    );
                     HW_DECODE_FAILED_THIS_SESSION.store(true, Ordering::Relaxed);
                     use_hw = false;
                     sws_ctx = None;
@@ -426,20 +546,27 @@ fn run_rtsp(on_frame: Channel<InvokeResponseBody>, url: String) {
 
                 let bgr_bytes = bgr_frame.data(0).to_vec();
 
-                if is_cam_running() && cam_client_connected() {
+                if is_cam_running() && is_cam_active() && cam_client_connected() {
                     push_frame(IncomingFrame::RawBgr(bgr_bytes.clone()));
                 }
 
-                let _ = ui_tx.try_send(UiFrame {
-                    bgr_data: bgr_bytes,
-                    width,
-                    height,
-                });
+                if PREVIEW_ENABLED.load(Ordering::Acquire) {
+                    let _ = ui_tx.try_send(UiFrame {
+                        bgr_data: bgr_bytes,
+                        width,
+                        height,
+                    });
+                }
             }
         }
 
         break;
     }
 
+    if SENDER_RUNNING.load(Ordering::Acquire) {
+        set_sender_end_reason("RTSP stream ended unexpectedly");
+    } else {
+        set_sender_end_reason("stop requested by client");
+    }
     SENDER_RUNNING.store(false, Ordering::Relaxed);
 }

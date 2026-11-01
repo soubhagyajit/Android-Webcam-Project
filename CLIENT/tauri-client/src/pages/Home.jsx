@@ -55,7 +55,7 @@ function Home() {
   });
 
   const [virtualCamActive, setVirtualCamActive] = useState(false);
-  const [streamData, setStreamData] = useState({ width: 720, height: 1280 });
+  const [streamData, setStreamData] = useState({ width: 1280, height: 720 });
 
   const [showControls, setShowControls] = useState(false);
   const [resolutions, setResolutions] = useState([]);
@@ -79,8 +79,26 @@ function Home() {
   const streamConfigRef = useRef(null);
   const feedActiveRef = useRef(false);
   const feedTransitionRef = useRef(false);
-  const cameraIdleSinceRef = useRef(null);
+  const senderRetryAtRef = useRef(0);
+  const senderRetryCountRef = useRef(0);
+  const senderRetryBlockedRef = useRef(false);
+  const senderStartedAtRef = useRef(0);
+  const cameraUseCandidateRef = useRef(false);
+  const cameraUseCandidateSinceRef = useRef(0);
+  const cameraDemandRef = useRef(false);
+  const lastCameraUseRef = useRef(null);
+  const lastStableCameraUseRef = useRef(false);
+  const lastFeedDemandRef = useRef(null);
+  const skipInitialResolutionRestartRef = useRef(true);
   const previewTimerRef = useRef(null);
+
+  const logDiagnostic = (event, details = {}) => {
+    const message = JSON.stringify({ at: new Date().toISOString(), event, ...details });
+    console.info("[AWC virtual camera]", message);
+    invoke("write_diagnostic_log", { message }).catch((error) => {
+      console.warn("Could not save virtual camera diagnostics:", error);
+    });
+  };
 
   // Tracking interaction state via refs to avoid stale closures in setInterval
   const isDraggingFocus = useRef(false);
@@ -92,6 +110,13 @@ function Home() {
     getVersion().then((v) => {
       setAppVersion(v);
       getCurrentWindow().setTitle(`AWC v${v}`);
+    });
+  }, []);
+
+  useEffect(() => {
+    invoke("init_cam", { on: true, height: 720, width: 1280 }).catch((error) => {
+      console.error("Failed to initialize virtual camera:", error);
+      updateStatus("Virtual camera failed to start", "error");
     });
   }, []);
 
@@ -132,18 +157,12 @@ function Home() {
 
   useEffect(() => {
     const applyResolutionChange = async () => {
-      if (vc) {
-        await invoke("init_cam", {
-          on: false,
-          height: streamData.height,
-          width: streamData.width,
-        });
-        await invoke("init_cam", {
-          on: true,
-          height: streamData.height,
-          width: streamData.width,
-        });
+      if (skipInitialResolutionRestartRef.current) {
+        skipInitialResolutionRestartRef.current = false;
+        return;
       }
+      await invoke("init_cam", { on: false, height: streamData.height, width: streamData.width });
+      await invoke("init_cam", { on: true, height: streamData.height, width: streamData.width });
     };
     applyResolutionChange();
   }, [streamData.width, streamData.height]);
@@ -155,28 +174,128 @@ function Home() {
     const syncFeedDemand = async () => {
       if (disposed || feedTransitionRef.current) return;
       const config = streamConfigRef.current;
-      let cameraInUse = false;
+      let cameraConnectedRaw = false;
       if (isConnected && vc) {
-        try { cameraInUse = await invoke("cam_client_connected"); } catch (_) {}
+        try { cameraConnectedRaw = await invoke("cam_client_connected"); } catch (_) {}
       }
-      if (cameraInUse) cameraIdleSinceRef.current = null;
-      else if (cameraIdleSinceRef.current === null) cameraIdleSinceRef.current = Date.now();
-      const cameraUseGrace = feedActiveRef.current && vc && cameraIdleSinceRef.current !== null && Date.now() - cameraIdleSinceRef.current < 1500;
-      const wanted = !!config && isConnected && (previewActive || cameraInUse || cameraUseGrace);
+      const now = Date.now();
+      const cameraDetectionEnabled = isConnected && vc;
+      if (!cameraDetectionEnabled) {
+        cameraUseCandidateRef.current = false;
+        cameraUseCandidateSinceRef.current = now;
+        cameraDemandRef.current = false;
+      } else if (cameraConnectedRaw !== cameraUseCandidateRef.current) {
+        cameraUseCandidateRef.current = cameraConnectedRaw;
+        cameraUseCandidateSinceRef.current = now;
+      }
+
+      const cameraStateStableFor = now - cameraUseCandidateSinceRef.current;
+      if (cameraDetectionEnabled && cameraUseCandidateRef.current) {
+        if (!cameraDemandRef.current && cameraStateStableFor >= 2000) {
+          cameraDemandRef.current = true;
+        }
+      } else if (cameraDetectionEnabled) {
+        cameraDemandRef.current = false;
+      }
+
+      if (lastCameraUseRef.current !== cameraConnectedRaw) {
+        lastCameraUseRef.current = cameraConnectedRaw;
+        logDiagnostic("softcam-consumer-state", {
+          connectedToPhone: isConnected,
+          virtualCameraEnabled: vc,
+          rawConnected: cameraConnectedRaw,
+          stableConsumerConnected: cameraDemandRef.current,
+          stableForMs: cameraStateStableFor,
+        });
+      }
+      const cameraInUse = cameraDemandRef.current;
+      if (lastStableCameraUseRef.current !== cameraInUse) {
+        lastStableCameraUseRef.current = cameraInUse;
+        logDiagnostic("softcam-stable-consumer-state", {
+          virtualCameraEnabled: vc,
+          consumerConnected: cameraInUse,
+          rawConnected: cameraConnectedRaw,
+          stableForMs: cameraStateStableFor,
+        });
+      }
+      const wanted = !!config && isConnected && (previewActive || cameraInUse);
+      if (lastFeedDemandRef.current !== wanted) {
+        lastFeedDemandRef.current = wanted;
+        logDiagnostic("phone-feed-demand", {
+          wanted,
+          previewActive,
+          virtualCameraEnabled: vc,
+          consumerConnected: cameraInUse,
+          rawConsumerConnected: cameraConnectedRaw,
+          consumerStateStableForMs: cameraStateStableFor,
+          senderBelievedRunning: feedActiveRef.current,
+        });
+      }
+      const nativeFeedRunning = await invoke("sender_is_running").catch(() => false);
+      if (feedActiveRef.current && !nativeFeedRunning) {
+        feedActiveRef.current = false;
+        setFeedActive(false);
+        const now = Date.now();
+        const hadStableRun = now - senderStartedAtRef.current >= 10_000;
+        senderRetryCountRef.current = hadStableRun ? 1 : senderRetryCountRef.current + 1;
+        senderStartedAtRef.current = 0;
+        const endReason = await invoke("sender_last_end_reason").catch(() => "unknown");
+        logDiagnostic("sender-ended", {
+          wanted,
+          retryCount: senderRetryCountRef.current,
+          hadStableRun,
+          endReason,
+        });
+
+        if (wanted && senderRetryCountRef.current >= 3) {
+          senderRetryBlockedRef.current = true;
+          updateStatus("Phone feed stopped after repeated disconnects. Reconnect the phone to retry.", "error");
+        } else if (wanted) {
+          const retryDelay = senderRetryCountRef.current === 1 ? 1200 : 4000;
+          senderRetryAtRef.current = now + retryDelay;
+          updateStatus("Phone feed interrupted; retrying…", "error");
+        }
+      } else if (!feedActiveRef.current && nativeFeedRunning) {
+        feedActiveRef.current = true;
+        setFeedActive(true);
+      }
+      if (wanted && senderRetryBlockedRef.current) return;
+      if (!feedActiveRef.current && wanted && Date.now() < senderRetryAtRef.current) return;
       if (wanted === feedActiveRef.current) return;
+      const senderStopping = await invoke("sender_is_stopping").catch(() => false);
+      if (wanted && senderStopping) {
+        logDiagnostic("sender-start-deferred", { reason: "previous sender is still stopping" });
+        return;
+      }
       feedTransitionRef.current = true;
       try {
         if (wanted) {
+          logDiagnostic("sender-start-request", {
+            source: config.source,
+            previewActive,
+            virtualCameraEnabled: vc,
+            consumerConnected: cameraInUse,
+          });
           const started = await invoke("start_sender", {
             source: config.source,
             url: config.url,
             onFrame: previewChannel.current,
           });
-          if (!started) return;
+          logDiagnostic("sender-start-result", { started });
+          if (!started) {
+            senderRetryAtRef.current = Date.now() + 1200;
+            return;
+          }
           feedActiveRef.current = true;
           setFeedActive(true);
-          updateStatus(previewActive ? "Preview live" : "Virtual camera live", "active");
+          senderStartedAtRef.current = Date.now();
+          updateStatus(previewActive ? "Connecting to phone preview…" : "Connecting phone feed to virtual camera…", "idle");
         } else {
+          logDiagnostic("sender-stop-request", {
+            previewActive,
+            virtualCameraEnabled: vc,
+            consumerConnected: cameraInUse,
+          });
           await invoke("stop_sender");
           feedActiveRef.current = false;
           setFeedActive(false);
@@ -211,20 +330,13 @@ function Home() {
 
   const handleVC = async () => {
     let i = vc;
+    logDiagnostic("virtual-camera-toggle", { enabled: !i });
+    senderRetryCountRef.current = 0;
+    senderRetryBlockedRef.current = false;
+    senderRetryAtRef.current = 0;
     setVc(!i);
-    if (i === false) {
-      await invoke("init_cam", {
-        on: !i,
-        height: streamData.height,
-        width: streamData.width,
-      });
-    } else {
-      await invoke("init_cam", {
-        on: !i,
-        height: streamData.height,
-        width: streamData.width,
-      });
-    }
+    await invoke("set_cam_active", { active: !i });
+    updateStatus(i ? "Virtual camera stopped" : "Virtual camera started", i ? "idle" : "active");
   };
 
   const showToast = (message, isError = false) => {
@@ -250,21 +362,23 @@ function Home() {
     updateStatus("Querying device features...", "idle");
 
     try {
+      await waitForSenderShutdown();
       const response = await fetchUrl(`http://${phoneIP}:${httpPort}/features`);
       const features = await response.json();
 
       setStreamProtocol("mjpeg");
       let targetUrl = `http://${phoneIP}:${httpPort}/video`;
-      const isRtsp =
-        features.stream_protocol && features.stream_protocol.includes("RTSP");
+      const isRtsp = String(features.stream_protocol || "").toUpperCase().includes("RTSP");
 
       if (isRtsp) {
+        const selectedRtspPort = features.stream_port || Number(rtspPort);
         setStreamProtocol("rtsp");
-        setRtspPort(features.stream_port || rtspPort);
-        targetUrl = `rtsp://${phoneIP}:${rtspPort}`;
+        setRtspPort(String(selectedRtspPort));
+        targetUrl = `rtsp://${phoneIP}:${selectedRtspPort}`;
       }
 
       streamConfigRef.current = { source: isRtsp ? "rtsp" : "mjpeg", url: targetUrl };
+      logDiagnostic("phone-connect-succeeded", { source: isRtsp ? "rtsp" : "mjpeg" });
 
       setIsConnected(true);
       setShowControls(true);
@@ -272,6 +386,7 @@ function Home() {
       setConnectButtonText("Disconnect");
       setModeIndicator("streaming");
       updateStatus("Connected · waiting for camera use", "idle");
+      startPreviewWindow();
 
       if (features.resolutions) {
         setResolutions(features.resolutions);
@@ -287,18 +402,29 @@ function Home() {
   };
 
   const handleDisconnect = async () => {
+    logDiagnostic("phone-disconnect-requested", {
+      virtualCameraEnabled: vc,
+      senderBelievedRunning: feedActiveRef.current,
+    });
     setIsConnected(false);
-    setConnectButtonDisable(false);
+    setConnectButtonDisable(true);
     setConnectButtonText("Connect");
     setShowControls(false);
 
     streamConfigRef.current = null;
     setPreviewActive(false);
+    invoke("set_preview_enabled", { enabled: false }).catch(() => {});
     if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
     previewTimerRef.current = null;
     feedActiveRef.current = false;
+    senderRetryAtRef.current = 0;
+    senderRetryCountRef.current = 0;
+    senderRetryBlockedRef.current = false;
+    senderStartedAtRef.current = 0;
     setFeedActive(false);
     await invoke("stop_sender");
+    await waitForSenderShutdown();
+    setConnectButtonDisable(false);
 
     if (syncSettingsInterval.current || syncFeaturesInterval.current) {
       clearInterval(syncSettingsInterval.current);
@@ -310,11 +436,36 @@ function Home() {
     updateStatus("Disconnected", "idle");
   };
 
+  const waitForSenderShutdown = async () => {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const [running, stopping] = await Promise.all([
+        invoke("sender_is_running").catch(() => false),
+        invoke("sender_is_stopping").catch(() => false),
+      ]);
+      if (!running && !stopping) return;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error("Previous phone feed is still stopping");
+  };
+
   const handlePreviewToggle = () => {
     if (!isConnected) return;
+    startPreviewWindow();
+  };
+
+  const startPreviewWindow = () => {
     if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
+    senderRetryCountRef.current = 0;
+    senderRetryBlockedRef.current = false;
+    senderRetryAtRef.current = 0;
+    invoke("set_preview_enabled", { enabled: true }).catch((error) => {
+      console.error("Failed to enable preview channel:", error);
+    });
     setPreviewActive(true);
     previewTimerRef.current = setTimeout(() => {
+      invoke("set_preview_enabled", { enabled: false }).catch((error) => {
+        console.error("Failed to pause preview channel:", error);
+      });
       setPreviewActive(false);
       previewTimerRef.current = null;
     }, 30_000);
@@ -862,11 +1013,10 @@ function Home() {
               </div>
               <div>
                 <h2 className="text-2xl font-bold text-white mb-2">
-                  Connect Your Stream
+                  Connect Phone to Start Streaming
                 </h2>
                 <p className="text-slate-400 text-sm leading-relaxed">
-                  Toggle your phone's webcam server and enter the URL in the
-                  sidebar.
+                  Connect your phone to start its camera feed.
                 </p>
               </div>
             </div>
@@ -879,6 +1029,10 @@ function Home() {
                 phoneConnected={isConnected}
                 feedActive={feedActive}
                 cameraEnabled={vc || previewActive}
+                cameraActive={vc}
+                showPreview={previewActive}
+                previewExpired={isConnected && !previewActive}
+                onFrameReceived={() => setStatus({ message: "Phone feed preview", state: "active" })}
                 width={streamData.width}
                 height={streamData.height}
                 channel={previewChannel.current}
@@ -889,7 +1043,7 @@ function Home() {
                 onClick={handlePreviewToggle}
                 className="absolute top-5 right-5 z-10 rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-2 text-xs text-slate-200 hover:border-brand-500/60"
               >
-                {previewActive ? "Preview on · 30s" : "Preview for 30s"}
+                {previewActive ? "Preview on · 30s" : "Show Preview · 30s"}
               </button>
             )}
           </div>

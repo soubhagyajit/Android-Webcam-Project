@@ -1,14 +1,15 @@
 // vc_linux.rs — Pure virtual camera sink for Linux (v4l2loopback)
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use v4l::video::Output;
-use v4l::{Device, FourCC, Format};
+use v4l::{Device, Format, FourCC};
 use zune_jpeg::JpegDecoder;
 
 static CAM_RUNNING: AtomicBool = AtomicBool::new(false);
+static CAM_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CAM_THREAD: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
 /// Frames pushed directly from sender.rs
@@ -24,7 +25,18 @@ pub fn is_cam_running() -> bool {
 }
 
 #[tauri::command]
-pub fn cam_client_connected() -> bool { CAM_RUNNING.load(Ordering::Relaxed) }
+pub fn cam_client_connected() -> bool {
+    CAM_RUNNING.load(Ordering::Relaxed)
+}
+
+#[tauri::command]
+pub fn set_cam_active(active: bool) {
+    CAM_ACTIVE.store(active, Ordering::Relaxed);
+}
+
+pub fn is_cam_active() -> bool {
+    CAM_ACTIVE.load(Ordering::Relaxed)
+}
 
 /// Overwrites LATEST_FRAME with the latest payload sent by sender.rs
 pub fn push_frame(frame: IncomingFrame) {
@@ -73,7 +85,8 @@ fn start_cam(height: u32, width: u32) {
 
     // Use Output::format and Output::set_format explicitly to target V4L2_BUF_TYPE_VIDEO_OUTPUT.
     // This allows exclusive_caps=1 mode on v4l2loopback without returning EINVAL.
-    let mut fmt = Output::format(&dev).unwrap_or_else(|_| Format::new(width, height, FourCC::new(b"RGB3")));
+    let mut fmt =
+        Output::format(&dev).unwrap_or_else(|_| Format::new(width, height, FourCC::new(b"RGB3")));
     fmt.width = width;
     fmt.height = height;
     fmt.fourcc = FourCC::new(b"RGB3");

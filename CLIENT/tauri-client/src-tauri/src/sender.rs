@@ -1,11 +1,12 @@
 // sender.rs — middleman between the phone stream and vc.rs / UI preview.
 
+use crate::mjpeg::{self, MjpegEnd};
 use crate::vc::{cam_client_connected, is_cam_active, is_cam_running, push_frame, IncomingFrame};
 use ffmpeg_next as ff;
 use ffmpeg_sys_next as ffi;
 use image::{ImageFormat, RgbImage};
 use serde::Deserialize;
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender};
@@ -215,142 +216,45 @@ pub fn stop_sender() {
 
 // --- MJPEG path ---
 
-fn find_marker(buffer: &[u8], marker: &[u8]) -> Option<usize> {
-    if buffer.len() < marker.len() {
-        return None;
-    }
-    for i in 0..=(buffer.len() - marker.len()) {
-        if buffer[i..i + marker.len()] == *marker {
-            return Some(i);
-        }
-    }
-    None
-}
-
-fn read_next_jpeg(
-    reader: &mut impl Read,
-    buffer: &mut Vec<u8>,
-    chunk: &mut [u8],
-) -> std::io::Result<Option<Vec<u8>>> {
-    const HEADER_MARKER: [u8; 4] = [13, 10, 13, 10];
-    let header_end = loop {
-        if let Some(pos) = find_marker(buffer, &HEADER_MARKER) {
-            break pos;
-        }
-        let n = reader.read(chunk)?;
-        if n == 0 {
-            return Ok(None);
-        }
-        buffer.extend_from_slice(&chunk[..n]);
-    };
-
-    let header_text = String::from_utf8_lossy(&buffer[0..header_end]);
-    let content_length: usize = header_text
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.trim()
-                .eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse().ok())
-                .flatten()
-        })
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "MJPEG part has no valid Content-Length",
-            )
-        })?;
-
-    let frame_len = header_end + 4 + content_length;
-    while buffer.len() < frame_len {
-        let n = reader.read(chunk)?;
-        if n == 0 {
-            return Ok(None);
-        }
-        buffer.extend_from_slice(&chunk[..n]);
-    }
-
-    let jpeg = buffer[(header_end + 4)..frame_len].to_vec();
-    buffer.drain(..frame_len);
-    Ok(Some(jpeg))
-}
-
 fn run_mjpeg(on_frame: Channel<InvokeResponseBody>, url: String) {
     println!("sender: connecting to MJPEG at {url}");
 
-    // MJPEG responses are long-lived streams: a request timeout would close
-    // and reopen the phone camera feed periodically. Only bound connection
-    // establishment; once connected, read until the stream closes or Stop is
-    // requested.
-    let client = match reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(3))
-        .build()
-    {
-        Ok(c) => c,
-        Err(error) => {
-            set_sender_end_reason(format!("could not create MJPEG client: {error}"));
-            SENDER_RUNNING.store(false, Ordering::Relaxed);
-            return;
-        }
-    };
-
-    let mut reader = match client
-        .get(&url)
-        .send()
-        .and_then(|response| response.error_for_status())
-    {
-        Ok(response) => response,
-        Err(error) => {
-            println!("sender: failed to connect to MJPEG source {url}: {error}");
-            set_sender_end_reason(format!("MJPEG connect failed: {error}"));
-            SENDER_RUNNING.store(false, Ordering::Release);
-            return;
-        }
-    };
-
-    let mut buffer: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; 16384];
+    // The MJPEG response is a long-lived stream, so there is deliberately no
+    // overall request timeout (it would cut the feed periodically). mjpeg.rs
+    // bounds every individual wait instead: Stop is noticed within ~500 ms and
+    // a feed that goes silent for several seconds ends with a reason, rather
+    // than leaving this thread stuck in a read and wedging stop_sender().
     let mut last_preview_emit = Instant::now() - Duration::from_millis(66);
 
-    while SENDER_RUNNING.load(Ordering::Relaxed) {
-        let jpeg = match read_next_jpeg(&mut reader, &mut buffer, &mut chunk) {
-            Ok(Some(jpeg)) => jpeg,
-            Ok(None) => {
-                println!("sender: MJPEG stream ended");
-                set_sender_end_reason("MJPEG response ended");
-                break;
+    let end = tauri::async_runtime::block_on(mjpeg::run_session(
+        &url,
+        || SENDER_RUNNING.load(Ordering::Relaxed),
+        |jpeg| {
+            if is_cam_running() && is_cam_active() && cam_client_connected() {
+                push_frame(IncomingFrame::Jpeg(jpeg.clone()));
             }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                ) =>
-            {
-                continue;
-            }
-            Err(error) => {
-                println!("sender: MJPEG stream read failed: {error}");
-                set_sender_end_reason(format!("MJPEG read failed: {error}"));
-                break;
-            }
-        };
 
-        if is_cam_running() && is_cam_active() && cam_client_connected() {
-            push_frame(IncomingFrame::Jpeg(jpeg.clone()));
+            // Keep the preview rate bounded; the acknowledgement also ensures
+            // at most one full-size frame is in flight to the WebView.
+            if last_preview_emit.elapsed() >= Duration::from_millis(66) {
+                send_preview_frame(&on_frame, &jpeg);
+                last_preview_emit = Instant::now();
+            }
+        },
+    ));
+
+    match end {
+        MjpegEnd::Stopped => set_sender_end_reason("stop requested by client"),
+        MjpegEnd::Ended => {
+            println!("sender: MJPEG stream ended");
+            set_sender_end_reason("MJPEG response ended");
         }
-
-        // Keep the preview rate bounded; the acknowledgement also ensures at
-        // most one full-size frame is in flight to the WebView.
-        if last_preview_emit.elapsed() >= Duration::from_millis(66) {
-            send_preview_frame(&on_frame, &jpeg);
-            last_preview_emit = Instant::now();
+        MjpegEnd::Failed(reason) => {
+            println!("sender: MJPEG stream failed: {reason}");
+            set_sender_end_reason(reason);
         }
     }
-
-    if !SENDER_RUNNING.load(Ordering::Acquire) {
-        set_sender_end_reason("stop requested by client");
-    }
-    SENDER_RUNNING.store(false, Ordering::Relaxed);
+    SENDER_RUNNING.store(false, Ordering::Release);
 }
 
 // --- RTSP path ---

@@ -2,6 +2,7 @@
 mod adb;
 mod diagnostics;
 mod installer;
+mod mjpeg;
 mod sender;
 
 #[cfg(target_os = "windows")]

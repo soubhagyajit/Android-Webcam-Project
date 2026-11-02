@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-export default function Preview({ phoneConnected, feedActive, cameraEnabled, cameraActive, showPreview, previewExpired, onFrameReceived, width, height, channel }) {
+export default function Preview({ phoneConnected, feedActive, cameraEnabled, cameraActive, showPreview, previewExpired, onFrameReceived, width, height, frameHandlerRef }) {
   const videoRef = useRef(null);
   const phoneConnectedRef = useRef(phoneConnected);
   const showPreviewRef = useRef(showPreview);
@@ -30,19 +30,23 @@ export default function Preview({ phoneConnected, feedActive, cameraEnabled, cam
     let decoding = false;
     let disposed = false;
 
-    channel.onmessage = async (buffer) => {
+    // Home creates a new Tauri Channel for every sender session (a Channel can
+    // only be used once) and forwards its messages to this handler.
+    frameHandlerRef.current = async (buffer) => {
       const bytes = buffer instanceof ArrayBuffer
         ? new Uint8Array(buffer)
         : new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
       const frameId = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
         .getUint32(0, true);
       let bitmap;
+      let ownsDecode = false;
 
       try {
         if (disposed || !phoneConnectedRef.current || !showPreviewRef.current || decoding || bytes.byteLength <= 4) {
           return;
         }
         decoding = true;
+        ownsDecode = true;
         bitmap = await createImageBitmap(
           new Blob([bytes.subarray(4)], { type: "image/jpeg" }),
         );
@@ -68,7 +72,9 @@ export default function Preview({ phoneConnected, feedActive, cameraEnabled, cam
         console.error("Failed to render preview frame:", error);
       } finally {
         bitmap?.close();
-        decoding = false;
+        // Only the call that started a decode may clear the flag; a frame that
+        // was skipped because one is in flight must not reset it.
+        if (ownsDecode) decoding = false;
         try {
           await invoke("preview_frame_ack", { frameId });
         } catch (error) {
@@ -79,13 +85,13 @@ export default function Preview({ phoneConnected, feedActive, cameraEnabled, cam
 
     return () => {
       disposed = true;
-      channel.onmessage = null;
+      frameHandlerRef.current = null;
       if (videoRef.current) {
         videoRef.current.width = 0;
         videoRef.current.height = 0;
       }
     };
-  }, [channel]);
+  }, [frameHandlerRef]);
 
   const placeholderTitle = previewExpired
     ? "PREVIEW PAUSED"

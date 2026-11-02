@@ -10,6 +10,15 @@ static CAM_RUNNING: AtomicBool = AtomicBool::new(false);
 static CAM_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CAM_THREAD: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
+/// How long a real frame keeps being re-sent when the phone feed goes quiet,
+/// before the "no phone feed" card takes over.
+const REAL_FRAME_STALE_AFTER: Duration = Duration::from_secs(2);
+/// A real frame is only re-sent once the feed is this late (normal 30 fps
+/// arrives every ~33 ms, so this never fires on a healthy stream).
+const REPEAT_REAL_FRAME_AFTER: Duration = Duration::from_millis(100);
+/// How often the idle card is re-sent while there is no feed at all.
+const IDLE_CARD_INTERVAL: Duration = Duration::from_millis(33);
+
 /// What sender.rs hands off, depending on which source it read from.
 /// MJPEG frames arrive already-encoded and still need a JPEG decode here.
 /// RTSP frames arrive already-decoded (by ffmpeg) and go straight to softcam.
@@ -247,7 +256,10 @@ fn start_cam(height: u32, width: u32) {
         connected = now_connected;
         CAM_CLIENT_CONNECTED.store(now_connected, Ordering::Relaxed);
         if just_connected {
-            last_frame_at = Instant::now() - Duration::from_millis(33);
+            // Make the first frame (idle card or last video frame) go out right away.
+            last_frame_at = Instant::now()
+                .checked_sub(REPEAT_REAL_FRAME_AFTER)
+                .unwrap_or_else(Instant::now);
         }
         if !now_connected {
             LATEST_FRAME.lock().unwrap().take();
@@ -256,15 +268,26 @@ fn start_cam(height: u32, width: u32) {
         }
         let frame = LATEST_FRAME.lock().unwrap().take();
         let Some(frame) = frame else {
-            if now_connected && last_frame_at.elapsed() >= Duration::from_millis(33) {
-                let output =
-                    if last_real_frame_at.is_some_and(|at| at.elapsed() < Duration::from_secs(2)) {
-                        bgr_scratch.as_slice()
-                    } else if CAM_ACTIVE.load(Ordering::Relaxed) {
-                        active_frame.as_slice()
-                    } else {
-                        inactive_frame.as_slice()
-                    };
+            // No new frame from the phone. `bgr_scratch` always holds the last
+            // real frame (both branches below leave it that way), so a short
+            // gap keeps showing video; only a long gap falls back to the card.
+            let showing_real_frame =
+                last_real_frame_at.is_some_and(|at| at.elapsed() < REAL_FRAME_STALE_AFTER);
+            let repeat_after = if showing_real_frame {
+                // Only repeat when the feed is genuinely late, not on normal
+                // 30 fps jitter, so a steady stream never gets duplicate frames.
+                REPEAT_REAL_FRAME_AFTER
+            } else {
+                IDLE_CARD_INTERVAL
+            };
+            if last_frame_at.elapsed() >= repeat_after {
+                let output = if showing_real_frame {
+                    bgr_scratch.as_slice()
+                } else if CAM_ACTIVE.load(Ordering::Relaxed) {
+                    active_frame.as_slice()
+                } else {
+                    inactive_frame.as_slice()
+                };
                 unsafe { scSendFrame(cam, output.as_ptr()) };
                 last_frame_at = Instant::now();
             }
@@ -282,12 +305,17 @@ fn start_cam(height: u32, width: u32) {
                 last_real_frame_at = Some(last_frame_at);
             }
             IncomingFrame::RawBgr(bgr_bytes) => {
-                // Already decoded upstream (ffmpeg) — send as-is.
+                // Already decoded upstream (ffmpeg) — no decode needed.
                 // Guard the size so a mismatched resolution can't read out of bounds.
                 if bgr_bytes.len() != bgr_scratch.len() {
                     continue;
                 }
-                unsafe { scSendFrame(cam, bgr_bytes.as_ptr()) };
+                // Move (not copy) the frame into `bgr_scratch` so it doubles as
+                // the "last real frame" for the repeat path above. Before this,
+                // only the JPEG branch filled `bgr_scratch`, so in RTSP mode any
+                // repeat re-sent an all-zero (black) buffer.
+                bgr_scratch = bgr_bytes;
+                unsafe { scSendFrame(cam, bgr_scratch.as_ptr()) };
                 last_frame_at = Instant::now();
                 last_real_frame_at = Some(last_frame_at);
             }

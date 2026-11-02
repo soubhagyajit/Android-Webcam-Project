@@ -71,8 +71,19 @@ function Home() {
     disabled: true,
   });
 
-  const previewChannel = useRef(null);
-  if (!previewChannel.current) previewChannel.current = new Channel();
+  // A Tauri Channel is single-use: each start_sender call creates a fresh
+  // channel on the Rust side (its message counter restarts at 0) and the JS
+  // Channel only delivers messages in index order, then unregisters itself
+  // when the Rust side drops. Reusing one JS Channel therefore worked for the
+  // first sender session and silently dropped every frame after that. So we
+  // make a new Channel per start_sender and forward its messages to whatever
+  // handler <Preview> has registered in previewHandlerRef.
+  const previewHandlerRef = useRef(null);
+  const createPreviewChannel = () => {
+    const channel = new Channel();
+    channel.onmessage = (message) => previewHandlerRef.current?.(message);
+    return channel;
+  };
   const syncSettingsInterval = useRef(null);
   const syncFeaturesInterval = useRef(null);
   const debounceRef = useRef(null);
@@ -279,7 +290,7 @@ function Home() {
           const started = await invoke("start_sender", {
             source: config.source,
             url: config.url,
-            onFrame: previewChannel.current,
+            onFrame: createPreviewChannel(),
           });
           logDiagnostic("sender-start-result", { started });
           if (!started) {
@@ -422,10 +433,9 @@ function Home() {
     senderRetryBlockedRef.current = false;
     senderStartedAtRef.current = 0;
     setFeedActive(false);
-    await invoke("stop_sender");
-    await waitForSenderShutdown();
-    setConnectButtonDisable(false);
 
+    // These don't depend on the sender, so do them first: if shutdown below
+    // is slow or fails, we must not leave them polling a disconnected phone.
     if (syncSettingsInterval.current || syncFeaturesInterval.current) {
       clearInterval(syncSettingsInterval.current);
       clearInterval(syncFeaturesInterval.current);
@@ -433,7 +443,20 @@ function Home() {
       syncFeaturesInterval.current = null;
     }
 
-    updateStatus("Disconnected", "idle");
+    try {
+      await invoke("stop_sender");
+      await waitForSenderShutdown();
+      updateStatus("Disconnected", "idle");
+    } catch (error) {
+      // waitForSenderShutdown throws if the old feed won't stop. Still show
+      // the app as disconnected and re-enable the button; Connect waits for
+      // the sender again before starting a new session.
+      console.error("Phone feed did not shut down cleanly:", error);
+      logDiagnostic("sender-shutdown-failed", { error: String(error) });
+      updateStatus("Disconnected (previous feed still closing)", "idle");
+    } finally {
+      setConnectButtonDisable(false);
+    }
   };
 
   const waitForSenderShutdown = async () => {
@@ -1035,7 +1058,7 @@ function Home() {
                 onFrameReceived={() => setStatus({ message: "Phone feed preview", state: "active" })}
                 width={streamData.width}
                 height={streamData.height}
-                channel={previewChannel.current}
+                frameHandlerRef={previewHandlerRef}
               />
             </div>
             {isConnected && (

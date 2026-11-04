@@ -4,54 +4,12 @@
   <component name="GradleSettings">
     <option name="linkedExternalProjectsSettings">
       <GradleProjectSettings>
-        <compositeConfiguration>
-          <compositeBuild compositeDefinitionSource="SCRIPT">
-            <builds>
-              <build path="$PROJECT_DIR$/../RootEncoder/RootEncoder" name="RootEncoder">
-                <projects>
-                  <project path="$PROJECT_DIR$/../RootEncoder/RootEncoder" />
-                  <project path="$PROJECT_DIR$/../RootEncoder/RootEncoder/app" />
-                  <project path="$PROJECT_DIR$/../RootEncoder/RootEncoder/common" />
-                  <project path="$PROJECT_DIR$/../RootEncoder/RootEncoder/encoder" />
-                  <project path="$PROJECT_DIR$/../RootEncoder/RootEncoder/extra-sources" />
-                  <project path="$PROJECT_DIR$/../RootEncoder/RootEncoder/library" />
-                  <project path="$PROJECT_DIR$/../RootEncoder/RootEncoder/rtmp" />
-                  <project path="$PROJECT_DIR$/../RootEncoder/RootEncoder/rtsp" />
-                  <project path="$PROJECT_DIR$/../RootEncoder/RootEncoder/srt" />
-                  <project path="$PROJECT_DIR$/../RootEncoder/RootEncoder/udp" />
-                  <project path="$PROJECT_DIR$/../RootEncoder/RootEncoder/whip" />
-                </projects>
-              </build>
-              <build path="$PROJECT_DIR$/../RootEncoder/RTSP-Server" name="RTSP-Server">
-                <projects>
-                  <project path="$PROJECT_DIR$/../RootEncoder/RTSP-Server" />
-                  <project path="$PROJECT_DIR$/../RootEncoder/RTSP-Server/app" />
-                  <project path="$PROJECT_DIR$/../RootEncoder/RTSP-Server/rtspserver" />
-                </projects>
-              </build>
-            </builds>
-          </compositeBuild>
-        </compositeConfiguration>
         <option name="testRunner" value="CHOOSE_PER_TEST" />
         <option name="externalProjectPath" value="$PROJECT_DIR$" />
         <option name="modules">
           <set>
             <option value="$PROJECT_DIR$" />
             <option value="$PROJECT_DIR$/app" />
-            <option value="$PROJECT_DIR$/../RootEncoder/RTSP-Server" />
-            <option value="$PROJECT_DIR$/../RootEncoder/RTSP-Server/app" />
-            <option value="$PROJECT_DIR$/../RootEncoder/RTSP-Server/rtspserver" />
-            <option value="$PROJECT_DIR$/../RootEncoder/RootEncoder" />
-            <option value="$PROJECT_DIR$/../RootEncoder/RootEncoder/app" />
-            <option value="$PROJECT_DIR$/../RootEncoder/RootEncoder/common" />
-            <option value="$PROJECT_DIR$/../RootEncoder/RootEncoder/encoder" />
-            <option value="$PROJECT_DIR$/../RootEncoder/RootEncoder/extra-sources" />
-            <option value="$PROJECT_DIR$/../RootEncoder/RootEncoder/library" />
-            <option value="$PROJECT_DIR$/../RootEncoder/RootEncoder/rtmp" />
-            <option value="$PROJECT_DIR$/../RootEncoder/RootEncoder/rtsp" />
-            <option value="$PROJECT_DIR$/../RootEncoder/RootEncoder/srt" />
-            <option value="$PROJECT_DIR$/../RootEncoder/RootEncoder/udp" />
-            <option value="$PROJECT_DIR$/../RootEncoder/RootEncoder/whip" />
           </set>
         </option>
       </GradleProjectSettings>

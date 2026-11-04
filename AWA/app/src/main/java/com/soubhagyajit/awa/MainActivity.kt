@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.WindowManager
@@ -118,26 +119,23 @@ class MainActivity : ComponentActivity() {
 }
 @Composable
 fun CameraScreen(camView: CameraViewModel = viewModel()) {
-    // Check for both Camera & Audio permissions needed for streaming
-    val hasPermission by checkPermissions(
-        Manifest.permission.CAMERA,
-        Manifest.permission.RECORD_AUDIO,
-        Manifest.permission.INTERNET
-    )
-
+    val hasPermission by checkPermissions(*requiredPermissions())
     if (hasPermission) {
-        // Render Camera Preview / Streaming controls here
         CameraContent(camView)
     } else {
-        // Fallback UI shown while asking or if user denies permissions
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
-        ) {
-            Text("Camera and Audio permissions are required to stream.")
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("Camera, audio and local network permissions are required to stream.")
         }
     }
 }
+
+fun requiredPermissions(): Array<String> = buildList {
+    add(Manifest.permission.CAMERA)
+    add(Manifest.permission.RECORD_AUDIO)
+    if (Build.VERSION.SDK_INT >= 37) {
+        add(Manifest.permission.ACCESS_LOCAL_NETWORK)
+    }
+}.toTypedArray()
 
 @Composable
 private fun CameraContent(camView: CameraViewModel) {
@@ -645,38 +643,24 @@ fun getLocalIpAddress(): String? {
     return null
 }
 @Composable
-fun checkPermissions(
-    vararg permissions: String = arrayOf(
-        Manifest.permission.CAMERA,
-        Manifest.permission.RECORD_AUDIO
-    )
-): State<Boolean> {
+fun checkPermissions(vararg permissions: String): State<Boolean> {
     val context = LocalContext.current
-    val isPreview = LocalInspectionMode.current
+    if (LocalInspectionMode.current) return remember { mutableStateOf(true) }
 
-    // In Compose Preview, mock granted permissions to avoid preview runtime crashes
-    if (isPreview) {
-        return remember { mutableStateOf(true) }
+    val permissionList = permissions.toList()
+
+    fun isAllGranted() = permissionList.all {
+        ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
     }
 
-    fun isAllGranted() = permissions.all { permission ->
-        ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
-    }
-
-    val hasPermissions = remember(permissions) {
-        mutableStateOf(isAllGranted())
-    }
+    val hasPermissions = remember(permissionList) { mutableStateOf(isAllGranted()) }
 
     val launcher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) { results ->
-        hasPermissions.value = results.values.all { it }
-    }
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { hasPermissions.value = isAllGranted() }
 
-    LaunchedEffect(permissions) {
-        if (!hasPermissions.value) {
-            launcher.launch(permissions.toList().toTypedArray())
-        }
+    LaunchedEffect(permissionList) {
+        if (!hasPermissions.value) launcher.launch(permissionList.toTypedArray())
     }
 
     return hasPermissions

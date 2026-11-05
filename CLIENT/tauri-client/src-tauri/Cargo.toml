@@ -1,6 +1,6 @@
 [package]
 name = "awc"
-version = "1.0.6"
+version = "1.0.6+1"
 description = "Android Webcam Software - Desktop client"
 authors = ["Soubhagyajit Borah"]
 edition = "2024"
@@ -29,6 +29,6 @@ tauri-plugin-process = "2"
 tauri-plugin-store = "2"
 ffmpeg-next = "8.1.0"
 ffmpeg-sys-next = "8.1.0"
-tokio = { version = "1", features = ["process", "macros"] }
+tokio = { version = "1", features = ["process", "macros", "time"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 v4l = "0.14"

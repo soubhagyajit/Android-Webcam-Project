@@ -1,6 +1,8 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-mod installer;
 mod adb;
+mod diagnostics;
+mod installer;
+mod mjpeg;
 mod sender;
 
 #[cfg(target_os = "windows")]
@@ -23,14 +25,23 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            installer::init_installer, 
-            adb::adb_get_devices, 
-            adb::adb_connect_device, 
-            vc::init_cam, 
-            sender::set_hw_decode_enabled, 
-            sender::start_sender, 
+            installer::init_installer,
+            diagnostics::write_diagnostic_log,
+            adb::adb_get_devices,
+            adb::adb_connect_device,
+            vc::init_cam,
+            vc::cam_client_connected,
+            vc::set_cam_active,
+            sender::set_hw_decode_enabled,
+            sender::start_sender,
             sender::stop_sender,
-            sender::preview_frame_ack])
+            sender::sender_is_running,
+            sender::sender_is_stopping,
+            sender::sender_last_end_reason,
+            sender::refresh_preview_channel,
+            sender::set_preview_enabled,
+            sender::preview_frame_ack
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

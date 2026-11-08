@@ -133,6 +133,7 @@ fn glyph(c: u8) -> [u8; 7] {
         b'9' => [14, 17, 17, 15, 1, 1, 14],
         b'-' => [0, 0, 0, 31, 0, 0, 0],
         b':' => [0, 4, 4, 0, 4, 4, 0],
+        b'.' => [0, 0, 0, 0, 0, 12, 12],
         _ => [0; 7],
     }
 }
@@ -180,9 +181,9 @@ fn idle_frame(width: u32, height: u32, active: bool) -> Vec<u8> {
     }
     let scale = (width.min(height) / 180).clamp(1, 5);
     let (title, subtitle) = if active {
-        ("CAMERA ACTIVE", "NO PHONE FEED")
+        ("VIRTUAL CAM ACTIVE", "CONNECTING...")
     } else {
-        ("AWC VIRTUAL CAM NOT ACTIVE", "CONNECT PHONE IN AWC")
+        ("VIRTUAL CAM IS TURNED OFF IN CLIENT", "CONNECT PHONE IN AWC")
     };
     draw_text(
         &mut frame,

@@ -43,6 +43,7 @@ import androidx.lifecycle.viewModelScope
 import com.pedro.common.ConnectChecker
 import com.pedro.library.view.OpenGlView
 import com.pedro.rtspserver.RtspServerCamera2
+import com.soubhagyajit.awa.server.AwaDiscovery
 import com.soubhagyajit.awa.server.VideoStreamServer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -382,6 +383,7 @@ class CameraViewModel : ViewModel() {
         }
 
         VideoStreamServer.start(8080)
+        AwaDiscovery.register(context.applicationContext, 8080, _streamMode.value.name)
     }
 
     // --- Unified start/stop ---
@@ -1083,5 +1085,6 @@ class CameraViewModel : ViewModel() {
         hideLocalPreview()
         unbindCamera()
         stopRtspCamera()
+        AwaDiscovery.unregister()
     }
 }

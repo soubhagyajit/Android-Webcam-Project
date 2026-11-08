@@ -1,5 +1,5 @@
 # Android Webcam System
-Turn your Android phone into a high-quality webcam using a fully local, serverless architecture.
+Turn your Android phone into a high-quality webcam - fully local, Opensource.
 
 _**Open-source (GPL-3.0)**_
 

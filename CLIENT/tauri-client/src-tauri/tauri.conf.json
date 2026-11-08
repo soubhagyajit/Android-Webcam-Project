@@ -14,7 +14,9 @@
       {
         "title": "AWC",
         "decorations": true,
-        "height": 720,
+        "height": 800,
+        "minHeight": 800,
+        "minWidth": 1280,
         "width": 1280
       }
     ],

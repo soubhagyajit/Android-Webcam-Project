@@ -236,10 +236,6 @@ Having issues? Found a bug?
 > If this project helped you, please consider leaving a **GitHub Star** and sharing your feedback. Your support helps the project grow and motivates future development!
 
 ---
-> [!NOTE]
->*** *Virtual Webcam Device is back in v1.0.6. Enjoy AWP - Android Webcam Project!*
->*Virtual webcam device was not included in client version v1.0.5 as I was investing an issue. I released it in the next version with Virtual camera included. If you need the Virtual camera, plea[...]
-
 **Happy streaming! Made with ❤️ and ☕ by developers, for developers.**
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/R5O327R68W)

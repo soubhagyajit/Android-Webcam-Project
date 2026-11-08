@@ -1,5 +1,5 @@
 # Android Webcam System
-Turn your Android phone into a high-quality webcam using a fully local, serverless architecture.
+Turn your Android phone into a high-quality webcam.
 
 _**Open-source (GPL-3.0)**_
 
@@ -61,7 +61,7 @@ _**Open-source (GPL-3.0)**_
 This is a **complete professional solution** with:
 
 - 📱 **Kotlin Mobile App** (Android for now)
-- 💻 **Tauri Desktop Client** (Windows/Mac/Linux)
+- 💻 **Tauri Desktop Client** (Windows only for now, Linux development in progress)
 - 🔌 **USB Connection Support** (low latency, more stable)
 - 📡 **WiFi Connection Support** (wireless freedom)
 
@@ -75,9 +75,10 @@ Kotlin-based mobile app that acts as the streaming server.
 ## Features
 
 ### Mobile App
-- HD/FHD/4K resolution support (480p, 720p, 1080p, 4K)
+- upto 4K resolution support (max resolution depends upon Device specifications and capabilities)
 - Front/back camera switching
 - Manual/Auto Focus
+- Exposure Control
 - Zoom/Lens switch
 - USB and WiFi connection modes
 - Real-time connection status
@@ -115,7 +116,6 @@ The desktop client creates a virtual webcam that works with:
 - ✅ Google Meet
 - ✅ Discord
 - ✅ OBS Studio
-- ✅ Skype
 - ✅ Any app that uses webcams!
 
 ### Windows Setup
@@ -144,10 +144,10 @@ Edit in mobile app settings or in code:
 
 ### Desktop Apps
 ```bash
-cd desktop-client
+cd CLIENT/tauri-client
 
 # Windows
-npm run build:win
+yarn install && yarn tauri build
 
 ```
 
@@ -163,7 +163,7 @@ npm run build:win
 
 ### Video Quality Issues
 
-- Lower resolution to 720p
+- Lower resolution to 720p/480p
 - Use USB instead of WiFi
 - Close other apps using camera
 - Use 5GHz WiFi if available
@@ -216,7 +216,7 @@ See the [LICENSE](LICENSE) file for full details.
 
 ## Roadmap
 
-- [ ] Able to stream while the phone screen is off (only dim option available now)
+- [ ] Stream while the phone screen is off/locked (only dim option available now)
 - [ ] Run as Background service
 - [ ] More layout optimization
 - [ ] Audio streaming support
@@ -236,10 +236,6 @@ Having issues? Found a bug?
 > If this project helped you, please consider leaving a **GitHub Star** and sharing your feedback. Your support helps the project grow and motivates future development!
 
 ---
-> [!NOTE]
->*** *Virtual Webcam Device is back in v1.0.6. Enjoy AWP - Android Webcam Project!*
->*Virtual webcam device was not included in client version v1.0.5 as I was investing an issue. I released it in the next version with Virtual camera included. If you need the Virtual camera, plea[...]
-
 **Happy streaming! Made with ❤️ and ☕ by developers, for developers.**
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/R5O327R68W)

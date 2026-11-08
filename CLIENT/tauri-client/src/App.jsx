@@ -1,6 +1,7 @@
 import "./App.css";
 import Home from "./pages/Home";
 import Installer from "./components/Installer";
+import About from "./components/About";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import {
   getAllWindows,
@@ -9,10 +10,7 @@ import {
 } from "@tauri-apps/api/window";
 import { Menu, MenuItem, Submenu } from "@tauri-apps/api/menu";
 import { exit, relaunch } from "@tauri-apps/plugin-process";
-import {
-  getAllWebviewWindows,
-  WebviewWindow,
-} from "@tauri-apps/api/webviewWindow";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useEffect, useState } from "react";
 import { Webview } from "@tauri-apps/api/webview";
 import { load } from "@tauri-apps/plugin-store";
@@ -57,19 +55,39 @@ function App() {
             await MenuItem.new({
               id: "about",
               text: "About",
-              action: () => getCurrentWindow().emit("open-about"),
+              action: () => openAboutWindow(),
             }),
           ],
         },
       ],
     });
 
-    // If a window was not created with an explicit menu or had one set explicitly,
-    // this menu will be assigned to it.
+    const mainWindow = await Window.getByLabel("main");
+    if (mainWindow) {
+      await menu.setAsWindowMenu(mainWindow);
+    }
+  };
 
-    await menu.setAsAppMenu();
+  const openAboutWindow = async () => {
+    const existing = await WebviewWindow.getByLabel("About");
+    if (existing) {
+      await existing.setFocus();
+      return;
+    }
+
+    new WebviewWindow("About", {
+      url: "/about",
+      title: "About AWC",
+      width: 440,
+      height: 540,
+      center: true,
+      resizable: false,
+    });
   };
   useEffect(() => {
+    // App is mounted in each webview; only the main client owns the menu and setup flow.
+    if (getCurrentWindow().label !== "main") return;
+
     setupMenu();
     const initStore = async () => {
       const store = await load("settings.json", { autoSave: false });
@@ -132,6 +150,7 @@ function App() {
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/installer" element={<Installer />} />
+        <Route path="/about" element={<About />} />
       </Routes>
     </BrowserRouter>
   );

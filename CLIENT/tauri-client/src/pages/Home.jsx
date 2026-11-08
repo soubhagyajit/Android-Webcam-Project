@@ -3,6 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { load } from "@tauri-apps/plugin-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import Preview from "../components/preview";
@@ -45,6 +46,12 @@ function Home() {
   //devices
   const [devices, setDevices] = useState([]);
   const [devicesLoading, setDevicesLoading] = useState(false);
+  const [wifiScanning, setWifiScanning] = useState(false);
+  const [wifiDevices, setWifiDevices] = useState([]);
+  const [wifiDeviceState, setWifiDeviceState] = useState({});
+  const [wifiScanError, setWifiScanError] = useState("");
+  const [lastWifiDevice, setLastWifiDevice] = useState(null);
+  const scanSequenceRef = useRef(0);
   // settings
   const [deviceFeatures, setDeviceFeatures] = useState(null);
   const [deviceSettings, setDeviceSettings] = useState({
@@ -144,12 +151,16 @@ function Home() {
         settingsStore.current = store;
         const savedMode = await store.get("connectionMode");
         const savedIP = await store.get("phoneIP");
+        const lastWifiDevice = await store.get("lastWifiDevice");
+        setLastWifiDevice(lastWifiDevice || null);
         const initialMode = savedMode === "wifi" ? "wifi" : "usb";
 
         setMode(initialMode);
         setPhoneIP(
-          typeof savedIP === "string" && savedIP.trim()
-            ? savedIP
+          typeof lastWifiDevice?.ip === "string" && lastWifiDevice.ip.trim()
+            ? lastWifiDevice.ip
+            : typeof savedIP === "string" && savedIP.trim()
+              ? savedIP
             : initialMode === "wifi"
               ? "192.168.31.12"
               : "127.0.0.1",
@@ -180,20 +191,67 @@ function Home() {
 
   useEffect(() => {
     if (!preferencesLoaded) return;
-
-    const urlInput = document.getElementById("serverURL");
     const isInitialEffect = firstModeEffect.current;
     firstModeEffect.current = false;
     if (mode === "usb") {
-      urlInput.classList.replace("flex", "hidden");
       if (!isInitialEffect) setPhoneIP("127.0.0.1");
       setHttpPort("8080");
       handleGetDevices();
     } else if (mode === "wifi") {
-      urlInput.classList.replace("hidden", "flex");
-      if (!isInitialEffect) setPhoneIP("192.168.31.12");
+      if (!isInitialEffect) setPhoneIP(lastWifiDevice?.ip || "192.168.31.12");
       setHttpPort("8080");
     }
+  }, [mode, preferencesLoaded]);
+
+  useEffect(() => {
+    if (!preferencesLoaded || mode !== "wifi") {
+      scanSequenceRef.current += 1;
+      invoke("cancel_device_scan").catch(() => {});
+      setWifiScanning(false);
+      return;
+    }
+
+    let disposed = false;
+    let unlisten = [];
+    const addWifiDevice = (device) => {
+      if (!device?.ip) return;
+      setWifiDevices((current) => current.some((item) => item.ip === device.ip)
+        ? current
+        : [...current, device]);
+    };
+
+    const setupScan = async () => {
+      const stopDeviceListener = await listen("scan-device-found", (event) => {
+        if (event.payload?.requestId === scanSequenceRef.current) {
+          addWifiDevice(event.payload.device);
+        }
+      });
+      if (disposed) stopDeviceListener();
+      else unlisten.push(stopDeviceListener);
+
+      const stopFinishedListener = await listen("scan-finished", (event) => {
+        if (!disposed && event.payload?.requestId === scanSequenceRef.current) {
+          setWifiScanning(false);
+          if (event.payload?.error) setWifiScanError(event.payload.error);
+          else setWifiScanError("");
+        }
+      });
+      if (disposed) stopFinishedListener();
+      else unlisten.push(stopFinishedListener);
+      if (!disposed) runWifiScan();
+    };
+    setupScan().catch((error) => {
+      console.error("Could not listen for discovery events:", error);
+      setWifiScanError("Device discovery could not start.");
+      setWifiScanning(false);
+    });
+
+    return () => {
+      disposed = true;
+      scanSequenceRef.current += 1;
+      invoke("cancel_device_scan").catch(() => {});
+      unlisten.forEach((stop) => stop());
+    };
   }, [mode, preferencesLoaded]);
 
   useEffect(() => {
@@ -418,6 +476,96 @@ function Home() {
     }
   };
 
+  const runWifiScan = async () => {
+    if (mode !== "wifi") return;
+    const requestId = ++scanSequenceRef.current;
+    setWifiScanning(true);
+    setWifiScanError("");
+    setWifiDevices([]);
+    setWifiDeviceState({});
+    if (lastWifiDevice?.ip) {
+      fetchUrl(`http://${lastWifiDevice.ip}:${lastWifiDevice.port || 8080}/features`, { timeoutMs: 700 })
+        .then(async (response) => {
+          if (!response.ok) return null;
+          const features = await response.json();
+          if (!Array.isArray(features.resolutions) || !features.stream_protocol) return null;
+          return {
+            ...lastWifiDevice,
+            port: features.server_port || lastWifiDevice.port || 8080,
+            protocol: features.stream_protocol,
+          };
+        })
+        .then((device) => {
+          if (device && requestId === scanSequenceRef.current) {
+            setWifiDeviceState((current) => ({ ...current, [device.ip]: "ready" }));
+            setWifiDevices((current) => current.some((item) => item.ip === device.ip)
+              ? current
+              : [device, ...current]);
+          }
+        })
+        .catch(() => {});
+    }
+    try {
+      await invoke("cancel_device_scan");
+      const found = await invoke("discover_devices", { requestId });
+      if (requestId === scanSequenceRef.current) {
+        setWifiDevices((current) => {
+          const byIp = new Map(current.map((device) => [device.ip, device]));
+          (found || []).forEach((device) => byIp.set(device.ip, device));
+          const values = [...byIp.values()];
+          return lastWifiDevice
+            ? values.sort((a, b) => Number(b.ip === lastWifiDevice.ip) - Number(a.ip === lastWifiDevice.ip))
+            : values;
+        });
+        setWifiScanning(false);
+      }
+    } catch (error) {
+      if (requestId === scanSequenceRef.current) {
+        console.warn("WiFi discovery failed:", error);
+        setWifiScanError(String(error));
+        setWifiScanning(false);
+      }
+    }
+  };
+
+  const handleWifiDeviceSelect = async (device) => {
+    setPhoneIP(device.ip);
+    setHttpPort(String(device.port || 8080));
+    setWifiDeviceState((current) => ({ ...current, [device.ip]: "checking" }));
+    try {
+      const response = await fetchUrl(`http://${device.ip}:${device.port || 8080}/features`, { timeoutMs: 1500 });
+      if (!response.ok) throw new Error(`Phone returned HTTP ${response.status}`);
+      const features = await response.json();
+      if (!Array.isArray(features.resolutions) || !features.stream_protocol) {
+        throw new Error("The device did not return valid AWA features.");
+      }
+      const isRtsp = String(features.stream_protocol).toUpperCase() === "H264_RTSP";
+      setStreamProtocol(isRtsp ? "rtsp" : "mjpeg");
+      if (features.server_port) setHttpPort(String(features.server_port));
+      if (isRtsp && features.rtsp_port) setRtspPort(String(features.rtsp_port));
+      setDeviceFeatures(features);
+      setResolutions(features.resolutions);
+      setWifiScanError("");
+      setWifiDeviceState((current) => ({ ...current, [device.ip]: "ready" }));
+      const selected = {
+        name: device.name,
+        ip: device.ip,
+        port: features.server_port || device.port || 8080,
+        protocol: features.stream_protocol,
+      };
+      setLastWifiDevice(selected);
+      try {
+        await settingsStore.current?.set("lastWifiDevice", selected);
+        await settingsStore.current?.save();
+      } catch (error) {
+        console.warn("Could not persist the last AWA device:", error);
+      }
+    } catch (error) {
+      setWifiDeviceState((current) => ({ ...current, [device.ip]: "error" }));
+      showToast(`Could not confirm ${device.ip}: ${error.message || error}`, true);
+    }
+  };
+
   const handleConnect = async () => {
     setConnectButtonDisable(true);
     setConnectButtonText("Connecting...");
@@ -433,13 +581,28 @@ function Home() {
       const isRtsp = String(features.stream_protocol || "").toUpperCase().includes("RTSP");
 
       if (isRtsp) {
-        const selectedRtspPort = features.stream_port || Number(rtspPort);
+        const selectedRtspPort = features.rtsp_port || Number(rtspPort) || 8554;
         setStreamProtocol("rtsp");
         setRtspPort(String(selectedRtspPort));
-        targetUrl = `rtsp://${phoneIP}:${selectedRtspPort}`;
+        targetUrl = `rtsp://${phoneIP}:${selectedRtspPort}/awa`;
       }
 
       streamConfigRef.current = { source: isRtsp ? "rtsp" : "mjpeg", url: targetUrl };
+      if (mode === "wifi") {
+        const usedDevice = {
+          name: wifiDevices.find((device) => device.ip === phoneIP)?.name || `AWA device (${phoneIP})`,
+          ip: phoneIP,
+          port: features.server_port || Number(httpPort) || 8080,
+          protocol: features.stream_protocol || (isRtsp ? "H264_RTSP" : "MJPEG"),
+        };
+        setLastWifiDevice(usedDevice);
+        try {
+          await settingsStore.current?.set("lastWifiDevice", usedDevice);
+          await settingsStore.current?.save();
+        } catch (error) {
+          console.warn("Could not persist the last AWA device:", error);
+        }
+      }
       logDiagnostic("phone-connect-succeeded", { source: isRtsp ? "rtsp" : "mjpeg" });
 
       setIsConnected(true);
@@ -458,8 +621,11 @@ function Home() {
       await initializeDeviceSync();
     } catch (err) {
       console.error("Failed to fetch features or connect:", err);
-      updateStatus("Connection failed", "error");
-      handleDisconnect();
+      if (mode === "wifi") {
+        setWifiDeviceState((current) => ({ ...current, [phoneIP]: "error" }));
+      }
+      await handleDisconnect();
+      updateStatus("Connection failed. Check the phone and network, then rescan or try the IP again.", "error");
     }
   };
 
@@ -799,28 +965,111 @@ function Home() {
                   WIFI
                 </option>
               </select>
-              <div className="gap-2 hidden" id="serverURL">
-                <input
-                  type="text"
-                  id="phoneIP"
-                  value={phoneIP}
-                  onChange={(e) => setPhoneIP(e.target.value)}
-                  placeholder="IP"
-                  className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand-500 outline-none transition-all"
-                />
-                <input
-                  type="text"
-                  value={streamProtocol === "mjpeg" ? httpPort : rtspPort}
-                  id="port"
-                  onChange={
-                    streamProtocol === "mjpeg"
-                      ? (e) => setHttpPort(e.target.value)
-                      : (e) => setRtspPort(e.target.value)
-                  }
-                  placeholder="Port"
-                  className="w-20 bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand-500 outline-none transition-all"
-                />
-              </div>
+              {mode === "wifi" && (
+                <div className="space-y-3" id="serverURL">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                      Devices on your network
+                    </label>
+                    <button
+                      type="button"
+                      onClick={runWifiScan}
+                      aria-label={wifiScanning ? "Rescan AWA devices while the scan is running" : "Rescan AWA devices"}
+                      aria-busy={wifiScanning}
+                      className="text-xs text-brand-400 hover:text-brand-300 transition-colors cursor-pointer"
+                    >
+                      <svg
+                        aria-hidden="true"
+                        className={`mr-1 inline-block h-3 w-3 ${wifiScanning ? "animate-spin" : ""}`}
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth="2"
+                          d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                        />
+                      </svg>
+                      Rescan
+                    </button>
+                  </div>
+                  {wifiDevices.length > 0 && (
+                    <div className="max-h-36 space-y-1 overflow-y-auto rounded-lg border border-slate-700/70 bg-slate-950/50 p-1">
+                      {wifiDevices.map((device) => {
+                        const state = wifiDeviceState[device.ip] || "new";
+                        const unavailable = state === "error";
+                        const checking = state === "checking";
+                        return (
+                          <button
+                            type="button"
+                            key={device.ip}
+                            onClick={() => handleWifiDeviceSelect(device)}
+                            disabled={unavailable || checking}
+                            aria-label={`${device.name || "AWA device"}, ${device.ip}, ${String(device.protocol || "MJPEG").toUpperCase()}${unavailable ? ", unavailable" : checking ? ", checking connection" : state === "ready" ? ", connection confirmed" : ""}`}
+                            className={`flex w-full items-center justify-between rounded-md border px-2.5 py-2 text-left transition-colors ${unavailable ? "border-red-500/40 bg-red-500/5 text-red-200 cursor-not-allowed" : state === "ready" ? "border-emerald-500/30 bg-emerald-500/5 hover:bg-emerald-500/10 cursor-pointer" : "border-transparent hover:bg-slate-800 cursor-pointer"} ${phoneIP === device.ip && !unavailable ? "ring-1 ring-emerald-500/40" : ""} ${checking ? "cursor-not-allowed opacity-70" : ""}`}
+                          >
+                            <span className="min-w-0 text-left">
+                              <span className="block truncate text-xs font-medium">{device.name || "AWA device"}</span>
+                              <span className={`block text-[11px] ${unavailable ? "text-red-300" : state === "ready" ? "text-emerald-300" : "text-slate-500"}`}>
+                                {device.ip}:{device.port}
+                                {checking ? " · Checking…" : unavailable ? " · Connection failed" : state === "ready" ? " · Ready" : ""}
+                              </span>
+                            </span>
+                            <span className={`ml-2 shrink-0 rounded-full px-2 py-1 text-[10px] font-semibold ${unavailable ? "bg-red-500/15 text-red-300" : state === "ready" ? "bg-emerald-500/15 text-emerald-300" : "bg-brand-500/15 text-brand-300"}`}>
+                              {String(device.protocol || "MJPEG").toUpperCase()}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {wifiScanning && (
+                    <p className="text-xs text-slate-400">Scanning local network…</p>
+                  )}
+                  {!wifiScanning && wifiDevices.length === 0 && (
+                    <p
+                      role={wifiScanError ? "alert" : "status"}
+                      aria-live={wifiScanError ? "assertive" : "polite"}
+                      className={`rounded-lg border p-2.5 text-xs leading-relaxed ${wifiScanError ? "border-red-500/40 bg-red-500/5 text-red-200" : "border-slate-800 bg-slate-900/50 text-slate-400"}`}
+                    >
+                      No devices found. mDNS may be blocked by Windows Firewall or your Wi-Fi router; allow local network discovery or connect both devices to the same non-guest network. You can still enter the phone’s IP below.
+                      {wifiScanError ? <span className="mt-1 block font-medium text-red-300">{wifiScanError}</span> : null}
+                    </p>
+                  )}
+                  <div className="flex items-end gap-2">
+                    <div className="min-w-0 flex-1">
+                      <label htmlFor="phoneIP" className="mb-1 block text-[11px] font-medium text-slate-400">Manual IP address</label>
+                      <input
+                        type="text"
+                        id="phoneIP"
+                        value={phoneIP}
+                        onChange={(e) => setPhoneIP(e.target.value)}
+                        placeholder="e.g. 192.168.43.1"
+                        autoComplete="off"
+                        className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-brand-500 outline-none transition-all"
+                      />
+                    </div>
+                    <div className="w-24 shrink-0">
+                      <label htmlFor="port" className="mb-1 block text-[11px] text-slate-400">
+                        {streamProtocol === "rtsp" ? "RTSP port" : "HTTP port"}
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="65535"
+                        value={streamProtocol === "mjpeg" ? httpPort : rtspPort}
+                        id="port"
+                        onChange={streamProtocol === "mjpeg"
+                          ? (e) => setHttpPort(e.target.value)
+                          : (e) => setRtspPort(e.target.value)}
+                        className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-brand-500 outline-none transition-all"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
               {/* Temporarily disabled Stream Mode selector; protocol detection remains active in handleConnect.
               <div>
                 <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
@@ -858,7 +1107,11 @@ function Home() {
           </div>
 
           {showControls && (
-            <div className="space-y-4 pt-2 border-t border-slate-800">
+            <fieldset
+              disabled={status.state === "error"}
+              aria-describedby="status"
+              className="min-w-0 space-y-4 border-0 p-0 pt-2 disabled:opacity-50"
+            >
               <div className="flex items-center justify-between">
                 <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   Camera Controls
@@ -1079,7 +1332,7 @@ function Home() {
                   <span>Brighter</span>
                 </div>
               </div>
-            </div>
+            </fieldset>
           )}
 
           <div className="space-y-3 pt-2 border-t border-slate-800">
@@ -1103,14 +1356,18 @@ function Home() {
               <span className="text-xs text-slate-500">Status</span>
               <span
                 id="modeIndicator"
-                className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-700 text-slate-300 uppercase"
+                role="status"
+                aria-label={`Connection state: ${status.state}`}
+                className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase ${status.state === "error" ? "bg-red-500/15 text-red-300" : status.state === "active" || isConnected ? "bg-emerald-500/15 text-emerald-300" : "bg-slate-700 text-slate-300"}`}
               >
                 {status.state}
               </span>
             </div>
             <div
               id="status"
-              className={`text-sm font-medium italic ${status.state === "error" ? "text-red-400" : ""} ${status.state === "active" ? "text-emerald-400" : ""} ${status.state === "idle" ? "text-brand-500" : ""}`}
+              role={status.state === "error" ? "alert" : "status"}
+              aria-live={status.state === "error" ? "assertive" : "polite"}
+              className={`text-sm font-medium italic ${status.state === "error" ? "text-red-400" : ""} ${status.state === "active" || isConnected ? "text-emerald-400" : ""} ${status.state === "idle" && !isConnected ? "text-brand-500" : ""}`}
             >
               {status.message}
             </div>

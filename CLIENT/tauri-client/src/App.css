@@ -159,3 +159,14 @@ button {
 .video-glow {
   box-shadow: 0 0 50px -12px rgba(99, 102, 241, 0.3);
 }
+
+fieldset:not(:disabled) button:not(:disabled),
+fieldset:not(:disabled) select:not(:disabled) {
+  cursor: pointer;
+}
+
+fieldset:disabled button,
+fieldset:disabled select,
+fieldset:disabled input {
+  cursor: not-allowed !important;
+}

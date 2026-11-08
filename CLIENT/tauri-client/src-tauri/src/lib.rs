@@ -1,6 +1,7 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 mod adb;
 mod diagnostics;
+mod discovery;
 mod installer;
 mod mjpeg;
 mod sender;
@@ -27,6 +28,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             installer::init_installer,
             diagnostics::write_diagnostic_log,
+            discovery::scan_mdns,
+            discovery::scan_subnet,
+            discovery::discover_devices,
+            discovery::cancel_device_scan,
             adb::adb_get_devices,
             adb::adb_connect_device,
             vc::init_cam,

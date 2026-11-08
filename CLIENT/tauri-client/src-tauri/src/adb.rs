@@ -109,6 +109,18 @@ pub async fn adb_disconnect_device(
     }
 }
 
+pub fn adb_kill_server(handle: &AppHandle) {
+    let adb = get_file_path(handle, "adb/adb.exe");
+    match std::process::Command::new(adb).arg("kill-server").output() {
+        Ok(output) if output.status.success() => println!("ADB server stopped"),
+        Ok(output) => eprintln!(
+            "Could not stop ADB server: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        Err(error) => eprintln!("Could not run adb kill-server: {error}"),
+    }
+}
+
 fn get_file_path(handle: &AppHandle, file: &str) -> PathBuf {
     if cfg!(debug_assertions) {
         let base = env::current_exe().unwrap().parent().unwrap().to_path_buf();

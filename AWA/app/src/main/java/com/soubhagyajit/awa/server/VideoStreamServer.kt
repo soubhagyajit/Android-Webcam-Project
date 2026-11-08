@@ -209,15 +209,23 @@ object VideoStreamServer {
     }
 
     private suspend fun streamMjpeg(outputStream: OutputStream) {
-        val boundary = "\r\n--frame\r\n"
+        val boundary = "\r\n--frame\r\n".toByteArray()
+        val contentType = "Content-Type: image/jpeg\r\n".toByteArray()
+
+        // CHANGED: only send frames that are new. The old loop re-sent the same latest frame
+        // every 33 ms, so a slow camera (or slow link) still pushed ~30 full JPEGs per second.
+        var lastSent: ByteArray? = null
+        var frames = 0
+        var bytes = 0L
+        var windowStart = System.nanoTime()
 
         while (true) {
             val frame = latestFrame
-            if (frame != null) {
+            if (frame != null && frame !== lastSent) {
                 try {
                     withContext(Dispatchers.IO) {
-                        outputStream.write(boundary.toByteArray())
-                        outputStream.write("Content-Type: image/jpeg\r\n".toByteArray())
+                        outputStream.write(boundary)
+                        outputStream.write(contentType)
                         outputStream.write("Content-Length: ${frame.size}\r\n\r\n".toByteArray())
                         outputStream.write(frame)
                         outputStream.flush()
@@ -225,8 +233,21 @@ object VideoStreamServer {
                 } catch (_: Exception) {
                     break
                 }
+                lastSent = frame
+                frames++
+                bytes += frame.size
+
+                val now = System.nanoTime()
+                if (now - windowStart >= 2_000_000_000L) {
+                    val secs = (now - windowStart) / 1e9
+                    Log.d("AWA", "MJPEG out: ${"%.1f".format(frames / secs)} fps, ${(bytes / 1024 / secs).toLong()} KB/s")
+                    frames = 0
+                    bytes = 0L
+                    windowStart = now
+                }
+            } else {
+                delay(5)
             }
-            delay(33)
         }
     }
 

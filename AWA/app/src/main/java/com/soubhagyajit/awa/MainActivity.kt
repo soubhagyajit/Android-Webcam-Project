@@ -613,7 +613,7 @@ fun ResolutionDropdown(camView: CameraViewModel, settings: CameraViewModel.Camer
             expanded = expanded,
             onDismissRequest = { expanded = false }
         ) {
-            CameraViewModel.StreamResolution.entries.forEach { res ->
+            settings.supportedResolutions.forEach { res ->
                 DropdownMenuItem(
                     text = { Text(res.label) },
                     onClick = {

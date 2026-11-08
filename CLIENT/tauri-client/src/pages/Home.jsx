@@ -3,6 +3,8 @@ import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { load } from "@tauri-apps/plugin-store";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import Preview from "../components/preview";
 
 function Home() {
@@ -11,7 +13,8 @@ function Home() {
 
   // connection settings
   const [mode, setMode] = useState("usb");
-  const [phoneIP, setPhoneIP] = useState("localhost");
+  const [phoneIP, setPhoneIP] = useState("127.0.0.1");
+  const [preferencesLoaded, setPreferencesLoaded] = useState(false);
 
   const [streamProtocol, setStreamProtocol] = useState("mjpeg");
   const [httpPort, setHttpPort] = useState("8080");
@@ -74,10 +77,13 @@ function Home() {
   const syncSettingsInterval = useRef(null);
   const syncFeaturesInterval = useRef(null);
   const debounceRef = useRef(null);
+  const settingsStore = useRef(null);
+  const firstModeEffect = useRef(true);
 
   // Tracking interaction state via refs to avoid stale closures in setInterval
   const isDraggingFocus = useRef(false);
   const isDraggingExposure = useRef(false);
+  const isDraggingZoom = useRef(false);
 
   const toastDiv = document.getElementById("toast");
 
@@ -89,18 +95,63 @@ function Home() {
   }, []);
 
   useEffect(() => {
+    const loadPreferences = async () => {
+      try {
+        const store = await load("settings.json", { autoSave: false });
+        settingsStore.current = store;
+        const savedMode = await store.get("connectionMode");
+        const savedIP = await store.get("phoneIP");
+        const initialMode = savedMode === "wifi" ? "wifi" : "usb";
+
+        setMode(initialMode);
+        setPhoneIP(
+          typeof savedIP === "string" && savedIP.trim()
+            ? savedIP
+            : initialMode === "wifi"
+              ? "192.168.31.12"
+              : "127.0.0.1",
+        );
+      } catch (error) {
+        console.error("Could not load connection preferences:", error);
+      } finally {
+        setPreferencesLoaded(true);
+      }
+    };
+
+    loadPreferences();
+  }, []);
+
+  useEffect(() => {
+    if (!preferencesLoaded || !settingsStore.current) return;
+
+    const savePreferences = async () => {
+      await settingsStore.current.set("connectionMode", mode);
+      await settingsStore.current.set("phoneIP", phoneIP);
+      await settingsStore.current.save();
+    };
+
+    savePreferences().catch((error) =>
+      console.error("Could not save connection preferences:", error),
+    );
+  }, [mode, phoneIP, preferencesLoaded]);
+
+  useEffect(() => {
+    if (!preferencesLoaded) return;
+
     const urlInput = document.getElementById("serverURL");
+    const isInitialEffect = firstModeEffect.current;
+    firstModeEffect.current = false;
     if (mode === "usb") {
       urlInput.classList.replace("flex", "hidden");
-      setPhoneIP("127.0.0.1");
+      if (!isInitialEffect) setPhoneIP("127.0.0.1");
       setHttpPort("8080");
       handleGetDevices();
     } else if (mode === "wifi") {
       urlInput.classList.replace("hidden", "flex");
-      setPhoneIP("192.168.31.12");
+      if (!isInitialEffect) setPhoneIP("192.168.31.12");
       setHttpPort("8080");
     }
-  }, [mode]);
+  }, [mode, preferencesLoaded]);
 
   useEffect(() => {
     setServerURL(`http://${phoneIP}:${httpPort}`);
@@ -269,7 +320,11 @@ function Home() {
     if (syncInterval !== 0 && !syncSettingsInterval.current) {
       syncSettingsInterval.current = setInterval(() => {
         // Pause fetching settings while the user is actively using the sliders
-        if (!isDraggingFocus.current && !isDraggingExposure.current) {
+        if (
+          !isDraggingFocus.current &&
+          !isDraggingExposure.current &&
+          !isDraggingZoom.current
+        ) {
           fetchSettings();
         }
       }, syncInterval);
@@ -362,6 +417,19 @@ function Home() {
     const val = e.target.value;
     setExposure((prev) => ({ ...prev, value: val }));
     sendControlDebounced(`exposure_index=${val}`, `Exposure: ${val}`);
+  };
+
+  const handleZoomChange = (e) => {
+    const val = Number(e.target.value);
+    setDeviceSettings((prev) => ({ ...prev, zoom: val }));
+    sendControlDebounced(`zoom=${val}`, `Zoom: ${val.toFixed(1)}x`);
+  };
+
+  const openAndroidAppPage = (event) => {
+    event.preventDefault();
+    openUrl("https://play.google.com/store/apps/details?id=com.soubhagyajit.awa").catch(
+      (error) => console.error("Could not open Google Play page:", error),
+    );
   };
 
   const handleResolution = () => {
@@ -707,6 +775,48 @@ function Home() {
               <div className="space-y-2 pt-2 border-t border-slate-800/50">
                 <div className="flex justify-between items-center mb-1">
                   <span className="text-[10px] text-slate-500 font-bold uppercase">
+                    Zoom
+                  </span>
+                  <span className="text-[9px] text-brand-400 font-mono">
+                    {Number(deviceSettings.zoom ?? 1).toFixed(1)}x
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={deviceFeatures?.zoom_min ?? 1}
+                  max={deviceFeatures?.zoom_max ?? 1}
+                  step="0.1"
+                  value={deviceSettings.zoom ?? 1}
+                  disabled={
+                    !Number.isFinite(deviceFeatures?.zoom_min) ||
+                    !Number.isFinite(deviceFeatures?.zoom_max) ||
+                    deviceFeatures.zoom_min >= deviceFeatures.zoom_max
+                  }
+                  onChange={handleZoomChange}
+                  onMouseDown={() => {
+                    isDraggingZoom.current = true;
+                  }}
+                  onMouseUp={() => {
+                    isDraggingZoom.current = false;
+                  }}
+                  onTouchStart={() => {
+                    isDraggingZoom.current = true;
+                  }}
+                  onTouchEnd={() => {
+                    isDraggingZoom.current = false;
+                  }}
+                  className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-brand-500 disabled:opacity-30 disabled:cursor-not-allowed"
+                  aria-label="Zoom"
+                />
+                <div className="flex justify-between text-[8px] text-slate-500 uppercase">
+                  <span>{deviceFeatures?.zoom_min ?? "—"}x</span>
+                  <span>{deviceFeatures?.zoom_max ?? "—"}x</span>
+                </div>
+              </div>
+
+              <div className="space-y-2 pt-2 border-t border-slate-800/50">
+                <div className="flex justify-between items-center mb-1">
+                  <span className="text-[10px] text-slate-500 font-bold uppercase">
                     Exposure
                   </span>
                   <span className="text-[9px] text-brand-400 font-mono">
@@ -787,32 +897,60 @@ function Home() {
           <div className="flex-1 flex items-center justify-center p-8">
             <div
               id="placeholder"
-              className={`${isConnected ? "hidden" : "block"} max-w-md text-center space-y-6`}
+              className={`${isConnected ? "hidden" : "grid"} w-full max-w-2xl grid-cols-1 sm:grid-cols-[1fr_auto] items-center gap-8`}
             >
-              <div className="w-20 h-20 bg-slate-800/50 rounded-3xl mx-auto flex items-center justify-center border border-slate-700">
-                <svg
-                  className="w-10 h-10 text-slate-500"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth="2"
-                    d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"
-                  />
-                </svg>
-              </div>
-              <div>
-                <h2 className="text-2xl font-bold text-white mb-2">
-                  Connect Your Stream
-                </h2>
-                <p className="text-slate-400 text-sm leading-relaxed">
-                  Toggle your phone's webcam server and enter the URL in the
-                  sidebar.
+              <section>
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-brand-400">
+                  Get started
                 </p>
-              </div>
+                <h2 className="mt-2 text-2xl font-bold text-white">
+                  Quick setup guide
+                </h2>
+                <ol className="mt-6 space-y-5">
+                  <li className="flex gap-3">
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand-500/15 text-xs font-bold text-brand-400">1</span>
+                    <div>
+                      <p className="text-sm font-semibold text-slate-200">Install AWA on your phone</p>
+                      <p className="mt-1 text-xs leading-relaxed text-slate-400">Scan the QR code or open the Google Play link.</p>
+                    </div>
+                  </li>
+                  <li className="flex gap-3">
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand-500/15 text-xs font-bold text-brand-400">2</span>
+                    <div>
+                      <p className="text-sm font-semibold text-slate-200">Open AWA</p>
+                      <p className="mt-1 text-xs leading-relaxed text-slate-400">Allow the requested permissions when prompted.</p>
+                    </div>
+                  </li>
+                  <li className="flex gap-3">
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand-500/15 text-xs font-bold text-brand-400">3</span>
+                    <div>
+                      <p className="text-sm font-semibold text-slate-200">Choose USB or Wi-Fi in this client</p>
+                      <p className="mt-1 text-xs leading-relaxed text-slate-400">For Wi-Fi, enter the phone’s IP address shown in AWA. For USB, connect the phone by cable.</p>
+                    </div>
+                  </li>
+                  <li className="flex gap-3">
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand-500/15 text-xs font-bold text-brand-400">4</span>
+                    <div>
+                      <p className="text-sm font-semibold text-slate-200">Connect</p>
+                      <p className="mt-1 text-xs leading-relaxed text-slate-400">Select your USB device if prompted, then click Connect in the sidebar.</p>
+                    </div>
+                  </li>
+                </ol>
+              </section>
+
+              <a
+                href="https://play.google.com/store/apps/details?id=com.soubhagyajit.awa"
+                onClick={openAndroidAppPage}
+                className="mx-auto flex w-36 flex-col items-center gap-3 rounded-2xl border border-slate-700 bg-slate-900/80 p-4 text-center transition-colors hover:border-brand-500/60 sm:mx-0"
+                aria-label="Open AWA on Google Play"
+              >
+                <img
+                  src="/awa-play-store-qr.png"
+                  alt="QR code to install AWA from Google Play"
+                  className="h-28 w-28 rounded-lg bg-white p-1"
+                />
+                <span className="text-xs font-semibold text-brand-400">Scan to install AWA</span>
+              </a>
             </div>
 
             <div

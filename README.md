@@ -9,10 +9,10 @@ A free, open-source webcam solution featuring high-resolution video streaming, U
 <br>
 
 [![AWA Release](https://img.shields.io/github/v/tag/soubhagyajit/Android-Webcam-Project?filter=a-*&label=AWA&style=for-the-badge)](https://github.com/soubhagyajit/Android-Webcam-Project/releases)
-[![AWA Downloads](https://img.shields.io/github/downloads/soubhagyajit/Android-Webcam-Project/a-v1.0.4/total?label=AWA%20Downloads&style=for-the-badge)](https://github.com/soubhagyajit/Android-Webcam-Project/releases)
+[![AWA Downloads](https://img.shields.io/github/downloads/soubhagyajit/Android-Webcam-Project/a-v1.0.4/total?label=Latest%20Downloads&style=for-the-badge)](https://github.com/soubhagyajit/Android-Webcam-Project/releases)
 
 [![AWC Release](https://img.shields.io/github/v/tag/soubhagyajit/Android-Webcam-Project?filter=c-*&label=AWC&style=for-the-badge)](https://github.com/soubhagyajit/Android-Webcam-Project/releases)
-[![AWC Downloads](https://img.shields.io/github/downloads/soubhagyajit/Android-Webcam-Project/c-v1.0.7/total?label=AWC%20Downloads&style=for-the-badge)](https://github.com/soubhagyajit/Android-Webcam-Project/releases)
+[![AWC Downloads](https://img.shields.io/github/downloads/soubhagyajit/Android-Webcam-Project/c-v1.0.7/total?label=Latest%20Downloads&style=for-the-badge)](https://github.com/soubhagyajit/Android-Webcam-Project/releases)
 
 <br>
 

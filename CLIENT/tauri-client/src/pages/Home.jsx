@@ -157,13 +157,13 @@ function Home() {
 
         setMode(initialMode);
         setPhoneIP(
-          typeof lastWifiDevice?.ip === "string" && lastWifiDevice.ip.trim()
-            ? lastWifiDevice.ip
-            : typeof savedIP === "string" && savedIP.trim()
-              ? savedIP
-            : initialMode === "wifi"
-              ? "192.168.31.12"
-              : "127.0.0.1",
+          initialMode === "usb"
+            ? "127.0.0.1"
+            : typeof lastWifiDevice?.ip === "string" && lastWifiDevice.ip.trim()
+              ? lastWifiDevice.ip
+              : typeof savedIP === "string" && savedIP.trim()
+                ? savedIP
+                : "192.168.31.12",
         );
       } catch (error) {
         console.error("Could not load connection preferences:", error);

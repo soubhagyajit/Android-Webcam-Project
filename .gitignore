@@ -13,7 +13,7 @@ softcam
 steps.md
 electron-app-old-arch/
 App-old
-APP
+/APP/
 .vs
 .vscode
 .gitignore

@@ -1,6 +1,6 @@
  <div align="center">
 
-# Android Webcam System
+# Android Webcam Project
 
 ### Turn your Android phone into a high-quality webcam.
 
